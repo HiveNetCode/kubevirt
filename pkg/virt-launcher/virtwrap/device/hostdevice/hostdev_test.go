@@ -454,12 +454,12 @@ func (p *stubAddressPool) PopAll(resource string) []string {
 
 var _ = Describe("CreatePCIHostDevicesFromRemainingAddresses", func() {
 	const (
-		testAliasPrefix  = "test-"
-		testResource0    = "vendor.com/gpu0"
-		testResource1    = "vendor.com/gpu1"
-		testPCIAddress0  = "0000:81:01.0"
-		testPCIAddress1  = "0000:81:01.1"
-		testPCIAddress2  = "0000:82:00.0"
+		testAliasPrefix = "test-"
+		testResource0   = "vendor.com/gpu0"
+		testResource1   = "vendor.com/gpu1"
+		testPCIAddress0 = "0000:81:01.0"
+		testPCIAddress1 = "0000:81:01.1"
+		testPCIAddress2 = "0000:82:00.0"
 	)
 
 	var pool *stubAddressPool
