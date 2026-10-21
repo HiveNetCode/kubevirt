@@ -646,6 +646,12 @@ func (p *stubPCIAddressPool) Pop(_ string) (string, error) {
 	return address, nil
 }
 
+func (p *stubPCIAddressPool) PopAll(_ string) []string {
+	addresses := p.pciAddresses
+	p.pciAddresses = nil
+	return addresses
+}
+
 type deviceDetacherStub struct {
 	fail bool
 }
