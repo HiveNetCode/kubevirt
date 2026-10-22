@@ -20,17 +20,18 @@
 package compute
 
 import (
-	"strings"
-
 	v1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
-// viommuGPUSubstring selects the passthrough GPU device names that require a
-// vIOMMU. RTX PRO 6000 (GB202GL) domains need an in-guest IOMMU for
-// IOMMU-protected VFIO device assignment.
-const viommuGPUSubstring = "GB202GL"
+// libvirtMaxVCPUsWithoutEIM mirrors the QEMU_MAX_VCPUS_WITHOUT_EIM constant
+// in the libvirt 11.9.0 builds used by the Hive images: above this vCPU count
+// qemuDomainDefAddDefaultDevices auto-adds an intel-iommu (intremap+eim, no
+// caching-mode) to the domain definition. QEMU refuses VFIO device assignment
+// behind such a vIOMMU and aborts at boot, so those domains crash-loop unless
+// the definition itself carries a complete vIOMMU.
+const libvirtMaxVCPUsWithoutEIM uint32 = 255
 
 const (
 	viommuIoapicDriverQemu = "qemu"
@@ -39,8 +40,14 @@ const (
 )
 
 // VIOMMUDomainConfigurator adds the in-guest vIOMMU (intel-iommu with
-// intremap, caching-mode and eim) plus the userspace IOAPIC to GPU
-// passthrough domains that require it.
+// intremap, caching-mode and eim) plus the userspace IOAPIC to VFIO
+// passthrough domains whose vCPU count exceeds the libvirt EIM threshold.
+//
+// The trigger is the vCPU count, not the GPU model: libvirt adds the
+// intel-iommu to every domain above libvirtMaxVCPUsWithoutEIM vCPUs, and QEMU
+// refuses VFIO assignment behind it without caching-mode. Domains at or below
+// the threshold are left untouched: libvirt adds no iommu there and VFIO works
+// without one.
 //
 // The flag set intremap=on + caching-mode=on + eim=on is the one measured to
 // work for 8-GPU NCCL passthrough. caching-mode='on' is not optional: QEMU
@@ -78,11 +85,36 @@ func (v VIOMMUDomainConfigurator) Configure(vmi *v1.VirtualMachineInstance, doma
 	return nil
 }
 
+// requiresVIOMMU reports whether the domain definition needs the vIOMMU:
+// the VMI has VFIO passthrough (host devices) and its vCPU count exceeds the
+// libvirt EIM threshold. GPU model is not a factor: libvirt's trigger is the
+// vCPU count, so any passthrough domain above the threshold needs the fix,
+// and no domain at or below it does.
 func requiresVIOMMU(vmi *v1.VirtualMachineInstance) bool {
-	for _, hostDevice := range vmi.Spec.Domain.Devices.HostDevices {
-		if strings.Contains(hostDevice.DeviceName, viommuGPUSubstring) {
-			return true
-		}
+	if len(vmi.Spec.Domain.Devices.HostDevices) == 0 {
+		return false
 	}
-	return false
+	return domainVCPUs(vmi) > libvirtMaxVCPUsWithoutEIM
+}
+
+// domainVCPUs is the total vCPU count of the VMI: cores * threads * sockets,
+// with unset fields defaulting to 1.
+func domainVCPUs(vmi *v1.VirtualMachineInstance) uint32 {
+	cpu := vmi.Spec.Domain.CPU
+	if cpu == nil {
+		return 1
+	}
+	cores := cpu.Cores
+	if cores == 0 {
+		cores = 1
+	}
+	threads := cpu.Threads
+	if threads == 0 {
+		threads = 1
+	}
+	sockets := cpu.Sockets
+	if sockets == 0 {
+		sockets = 1
+	}
+	return cores * threads * sockets
 }
