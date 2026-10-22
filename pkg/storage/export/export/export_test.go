@@ -57,11 +57,13 @@ import (
 	framework "k8s.io/client-go/tools/cache/testing"
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+	templateapi "kubevirt.io/virt-template-api/core"
+	"kubevirt.io/virt-template-api/core/v1beta1"
 
 	apiinstancetype "kubevirt.io/api/instancetype"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
@@ -73,6 +75,7 @@ import (
 	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 )
@@ -80,7 +83,7 @@ import (
 const (
 	testNamespace   = "default"
 	ingressSecret   = "ingress-secret"
-	currentVersion  = "v1beta1"
+	currentVersion  = "v1"
 	vmExportName    = "test"
 	labelKey        = "label-key"
 	labelValue      = "label-value"
@@ -92,9 +95,6 @@ var (
 	qemuGid            int64 = 107
 	expectedPodEnvVars       = []k8sv1.EnvVar{
 		{
-			Name:  "EXPORT_VM_DEF_URI",
-			Value: manifestsPath,
-		}, {
 			Name:  "CERT_FILE",
 			Value: "/cert/tls.crt",
 		}, {
@@ -132,6 +132,8 @@ var _ = Describe("Export controller", func() {
 		clusterPreferenceInformer   cache.SharedIndexInformer
 		controllerRevisionInformer  cache.SharedIndexInformer
 		vmBackupInformer            cache.SharedIndexInformer
+		vmBackupTrackerInformer     cache.SharedIndexInformer
+		vmTemplateInformer          cache.SharedIndexInformer
 		rqInformer                  cache.SharedIndexInformer
 		nsInformer                  cache.SharedIndexInformer
 		k8sClient                   *k8sfake.Clientset
@@ -220,6 +222,8 @@ var _ = Describe("Export controller", func() {
 		clusterPreferenceInformer, _ = testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterPreference{})
 		controllerRevisionInformer, _ = testutils.NewFakeInformerFor(&appsv1.ControllerRevision{})
 		vmBackupInformer, _ = testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackup{})
+		vmBackupTrackerInformer, _ = testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackupTracker{})
+		vmTemplateInformer, _ = testutils.NewFakeInformerFor(&v1beta1.VirtualMachineTemplate{})
 		rqInformer, _ = testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		nsInformer, _ = testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		fakeVolumeSnapshotProvider = &MockVolumeSnapshotProvider{
@@ -236,7 +240,7 @@ var _ = Describe("Export controller", func() {
 
 		virtClient.EXPECT().CoreV1().Return(k8sClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineExport(testNamespace).
-			Return(vmExportClient.ExportV1beta1().VirtualMachineExports(testNamespace)).AnyTimes()
+			Return(vmExportClient.ExportV1().VirtualMachineExports(testNamespace)).AnyTimes()
 
 		controller = &VMExportController{
 			Client:                      virtClient,
@@ -267,6 +271,8 @@ var _ = Describe("Export controller", func() {
 			ClusterPreferenceInformer:   clusterPreferenceInformer,
 			ControllerRevisionInformer:  controllerRevisionInformer,
 			VMBackupInformer:            vmBackupInformer,
+			VMBackupTrackerInformer:     vmBackupTrackerInformer,
+			VMTemplateInformer:          vmTemplateInformer,
 		}
 		initCert = func(ctrl *VMExportController) {
 			ctrl.caCertManager.Start()
@@ -1013,6 +1019,143 @@ var _ = Describe("Export controller", func() {
 		))
 	})
 
+	DescribeTable("Should set export pod env vars", func(vmExport *exportv1.VirtualMachineExport, source exportSource, expectManifest bool) {
+		pod, err := controller.createExporterPodManifest(vmExport, nil, source)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).To(ContainElements(expectedPodEnvVars))
+		if expectManifest {
+			Expect(pod.Spec.Containers[0].Env).To(ContainElement(k8sv1.EnvVar{
+				Name:  "EXPORT_VM_DEF_URI",
+				Value: manifestsPath,
+			}))
+		} else {
+			Expect(pod.Spec.Containers[0].Env).ToNot(ContainElement(
+				HaveField("Name", "EXPORT_VM_DEF_URI"),
+			))
+		}
+	},
+		Entry("for VM source", createVMVMExport(), NewVMSource(&sourceVolumes{}), true),
+		Entry("for VM Snapshot source", createSnapshotVMExport(), NewVMSnapshotSource(&sourceVolumes{}, "test-vm"), true),
+		Entry("for PVC source", createPVCVMExport(), NewPVCSource(&sourceVolumes{}), false),
+	)
+
+	It("should set OCI env vars when OCIExport feature gate is enabled and source is VM", func() {
+		syncCaches(stop)
+		enableOCIExportFeatureGate(kvInformer.GetStore())
+		vmInformer.GetStore().Add(&virtv1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: testVmName, Namespace: testNamespace},
+			Spec: virtv1.VirtualMachineSpec{Template: &virtv1.VirtualMachineInstanceTemplateSpec{
+				Spec: virtv1.VirtualMachineInstanceSpec{Volumes: []virtv1.Volume{}},
+			}},
+		})
+
+		svc := &k8sv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: testNamespace}}
+		pod, err := controller.createExporterPodManifest(createVMVMExport(), svc, NewVMSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).To(ContainElement(
+			k8sv1.EnvVar{Name: "EXPORT_OCI_URI", Value: ociPath},
+		))
+	})
+
+	It("should not set OCI env vars when OCIExport feature gate is disabled", func() {
+		pod, err := controller.createExporterPodManifest(createPVCVMExport(), nil, NewPVCSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).ToNot(ContainElement(
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("EXPORT_OCI_URI")}),
+		))
+	})
+
+	It("should not set OCI env vars for PVC source even when OCIExport is enabled", func() {
+		syncCaches(stop)
+		enableOCIExportFeatureGate(kvInformer.GetStore())
+
+		pod, err := controller.createExporterPodManifest(createPVCVMExport(), nil, NewPVCSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).ToNot(ContainElement(
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("EXPORT_OCI_URI")}),
+		))
+	})
+
+	DescribeTable("supportsOCI", func(vmExport *exportv1.VirtualMachineExport, expected bool) {
+		Expect(controller.supportsOCI(&vmExport.Spec)).To(Equal(expected))
+	},
+		Entry("returns true for VM source", createVMVMExport(), true),
+		Entry("returns true for VMSnapshot source", createSnapshotVMExport(), true),
+		Entry("returns true for VMTemplate source", createVMTemplateVMExport(), true),
+		Entry("returns false for PVC source", createPVCVMExport(), false),
+		Entry("returns false for Backup source", &exportv1.VirtualMachineExport{
+			ObjectMeta: createVMExportMeta(vmExportName),
+			Spec: exportv1.VirtualMachineExportSpec{
+				Source: k8sv1.TypedLocalObjectReference{
+					APIGroup: &backupv1.SchemeGroupVersion.Group,
+					Kind:     "VirtualMachineBackup",
+					Name:     "test-backup",
+				},
+			},
+		}, false),
+	)
+
+	DescribeTable("should set OCIReady condition when OCI export is enabled", func(vmExport *exportv1.VirtualMachineExport, source exportSource, pod *k8sv1.Pod, expectedStatus k8sv1.ConditionStatus, expectedReason string) {
+		syncCaches(stop)
+		enableOCIExportFeatureGate(kvInformer.GetStore())
+
+		populateInitialVMExportStatus(vmExport)
+		vmExportCopy := vmExport.DeepCopy()
+		svc := &k8sv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: testNamespace}}
+
+		err := controller.updateCommonVMExportStatusFields(vmExport, vmExportCopy, pod, svc, source)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(vmExportCopy.Status.Conditions).To(ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Type":   Equal(exportv1.ConditionOCIReady),
+			"Status": Equal(expectedStatus),
+			"Reason": Equal(expectedReason),
+		})))
+	},
+		Entry("VM source, pod ready", createVMVMExport(), NewVMSource(&sourceVolumes{}), &k8sv1.Pod{
+			Spec:   k8sv1.PodSpec{Containers: []k8sv1.Container{{Name: "export"}}},
+			Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning, ContainerStatuses: []k8sv1.ContainerStatus{{Ready: true}}},
+		}, k8sv1.ConditionTrue, ociDigestsComputedReason),
+		Entry("VM source, pod pending", createVMVMExport(), NewVMSource(&sourceVolumes{}), &k8sv1.Pod{
+			Status: k8sv1.PodStatus{Phase: k8sv1.PodPending},
+		}, k8sv1.ConditionFalse, ociDigestsPendingReason),
+		Entry("VMSnapshot source, pod ready", createSnapshotVMExport(), NewVMSnapshotSource(&sourceVolumes{}, "test-vm"), &k8sv1.Pod{
+			Spec:   k8sv1.PodSpec{Containers: []k8sv1.Container{{Name: "export"}}},
+			Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning, ContainerStatuses: []k8sv1.ContainerStatus{{Ready: true}}},
+		}, k8sv1.ConditionTrue, ociDigestsComputedReason),
+		Entry("VMTemplate source, pod ready", createVMTemplateVMExport(), NewVMTemplateSource(nil, &sourceVolumes{}), &k8sv1.Pod{
+			Spec:   k8sv1.PodSpec{Containers: []k8sv1.Container{{Name: "export"}}},
+			Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning, ContainerStatuses: []k8sv1.ContainerStatus{{Ready: true}}},
+		}, k8sv1.ConditionTrue, ociDigestsComputedReason),
+	)
+
+	DescribeTable("should not set OCIReady condition", func(vmExport *exportv1.VirtualMachineExport, source exportSource, enableGate bool) {
+		syncCaches(stop)
+		if enableGate {
+			enableOCIExportFeatureGate(kvInformer.GetStore())
+		}
+
+		populateInitialVMExportStatus(vmExport)
+		vmExportCopy := vmExport.DeepCopy()
+		svc := &k8sv1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test-svc", Namespace: testNamespace}}
+		pod := &k8sv1.Pod{
+			Spec:   k8sv1.PodSpec{Containers: []k8sv1.Container{{Name: "export"}}},
+			Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning, ContainerStatuses: []k8sv1.ContainerStatus{{Ready: true}}},
+		}
+
+		err := controller.updateCommonVMExportStatusFields(vmExport, vmExportCopy, pod, svc, source)
+		Expect(err).ToNot(HaveOccurred())
+
+		for _, cond := range vmExportCopy.Status.Conditions {
+			Expect(cond.Type).ToNot(Equal(exportv1.ConditionOCIReady))
+		}
+	},
+		Entry("PVC source, gate enabled", createPVCVMExport(), NewPVCSource(&sourceVolumes{}), true),
+		Entry("VM source, gate disabled", createVMVMExport(), NewVMSource(&sourceVolumes{}), false),
+		Entry("VMSnapshot source, gate disabled", createSnapshotVMExport(), NewVMSnapshotSource(&sourceVolumes{}, "test-vm"), false),
+		Entry("VMTemplate source, gate disabled", createVMTemplateVMExport(), NewVMTemplateSource(nil, &sourceVolumes{}), false),
+	)
+
 	DescribeTable("Volumemount names should be trimmed depending on the PVC name", func(pvcName string) {
 		testVMExport := createPVCVMExportWithName(pvcName)
 		testPVC := &k8sv1.PersistentVolumeClaim{
@@ -1102,6 +1245,16 @@ var _ = Describe("Export controller", func() {
 		Entry("Name with dots", "pvc.with.dots"),
 		Entry("Long name exceeding limit", strings.Repeat("a", validation.DNS1035LabelMaxLength+1)),
 	)
+
+	It("CreateServerPaths should parse OCI URI", func() {
+		const uri = "/export.oci.tar"
+
+		env := map[string]string{
+			"EXPORT_OCI_URI": uri,
+		}
+		paths := CreateServerPaths(env)
+		Expect(paths.OCIURI).To(Equal(uri))
+	})
 
 	DescribeTable("service name should be sanitized", func(exportName, expectedServiceName string) {
 		var service *k8sv1.Service
@@ -1460,9 +1613,75 @@ var _ = Describe("Export controller", func() {
 			Expect(cm.Data[vmManifest]).To(Equal(string(vmBytes)))
 			return true, cm, nil
 		})
-		err = controller.createDataManifestAndAddToPod(testVMExport, vm, testPod, service)
+		extra, err := controller.extraVMData(vm)
+		Expect(err).ToNot(HaveOccurred())
+		err = controller.createManifestAndAddToPod(testVMExport, vmManifest, vmBytes, testPod, service, extra)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(testVMExport.Status).ToNot(BeNil())
+	})
+
+	It("should create template manifest and add it to the pod spec", func() {
+		populateIngressSecret()
+		apiGroup := templateapi.GroupName
+		testVMExport := &exportv1.VirtualMachineExport{
+			ObjectMeta: createVMExportMeta(vmExportName),
+			Spec: exportv1.VirtualMachineExportSpec{
+				Source: k8sv1.TypedLocalObjectReference{
+					APIGroup: &apiGroup,
+					Kind:     vmTemplateKind,
+					Name:     "test-template",
+				},
+				TokenSecretRef: &tokenSecretName,
+			},
+		}
+		tpl := &v1beta1.VirtualMachineTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-template",
+				Namespace: testNamespace,
+			},
+			Spec: v1beta1.VirtualMachineTemplateSpec{
+				VirtualMachine: &runtime.RawExtension{Raw: []byte(`{"spec":{}}`)},
+			},
+		}
+
+		service := &k8sv1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      controller.getExportServiceName(testVMExport),
+				Namespace: testVMExport.Namespace,
+			},
+		}
+		testPod := &k8sv1.Pod{
+			Spec: k8sv1.PodSpec{
+				Containers: []k8sv1.Container{
+					{
+						VolumeMounts: []k8sv1.VolumeMount{},
+					},
+				},
+				Volumes: []k8sv1.Volume{},
+			},
+		}
+
+		cmName := controller.getVmManifestConfigMapName(testVMExport)
+		tplSource := NewVMTemplateSource(tpl, &sourceVolumes{})
+		key, tplBytes, extra, err := tplSource.ManifestData()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(key).To(Equal(vmTemplateManifest))
+		k8sClient.Fake.PrependReactor("create", "configmaps", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+			create, ok := action.(testing.CreateAction)
+			Expect(ok).To(BeTrue())
+			cm, ok := create.GetObject().(*k8sv1.ConfigMap)
+			Expect(ok).To(BeTrue())
+			Expect(cm.GetName()).To(Equal(cmName))
+			Expect(cm.GetNamespace()).To(Equal(testNamespace))
+			Expect(cm.Data).ToNot(BeEmpty())
+			Expect(cm.Data[internalHostKey]).To(Equal(fmt.Sprintf("%s.%s.svc", controller.getExportServiceName(testVMExport), service.Namespace)))
+			Expect(cm.Data[vmTemplateManifest]).To(Equal(string(tplBytes)))
+			Expect(cm.Data).ToNot(HaveKey(vmManifest))
+			return true, cm, nil
+		})
+
+		err = controller.createManifestAndAddToPod(testVMExport, vmTemplateManifest, tplBytes, testPod, service, extra)
+		Expect(err).ToNot(HaveOccurred())
 	})
 
 	createVM := func() *virtv1.VirtualMachine {
@@ -1838,6 +2057,21 @@ func createVMVMExport() *exportv1.VirtualMachineExport {
 	}
 }
 
+func createVMTemplateVMExport() *exportv1.VirtualMachineExport {
+	apiGroup := templateapi.GroupName
+	return &exportv1.VirtualMachineExport{
+		ObjectMeta: createVMExportMeta(vmExportName),
+		Spec: exportv1.VirtualMachineExportSpec{
+			Source: k8sv1.TypedLocalObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     vmTemplateKind,
+				Name:     "test-template",
+			},
+			TokenSecretRef: &tokenSecretName,
+		},
+	}
+}
+
 func createVMVMExportExternal() *exportv1.VirtualMachineExport {
 	res := createVMVMExport()
 	res.Status = &exportv1.VirtualMachineExportStatus{
@@ -1931,4 +2165,16 @@ func (v *MockVolumeSnapshotProvider) GetVolumeSnapshot(namespace, name string) (
 
 func (v *MockVolumeSnapshotProvider) Add(s *vsv1.VolumeSnapshot) {
 	v.volumeSnapshots = append(v.volumeSnapshots, s)
+}
+
+func enableOCIExportFeatureGate(kvStore cache.Store) {
+	testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &virtv1.KubeVirt{
+		Spec: virtv1.KubeVirtSpec{
+			Configuration: virtv1.KubeVirtConfiguration{
+				DeveloperConfiguration: &virtv1.DeveloperConfiguration{
+					FeatureGates: []string{featuregate.OCIExport},
+				},
+			},
+		},
+	})
 }

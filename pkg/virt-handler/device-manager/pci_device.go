@@ -42,7 +42,11 @@ import (
 const (
 	vfioDevicePath = "/dev/vfio/"
 	vfioMount      = "/dev/vfio/vfio"
-	pciBasePath    = "/sys/bus/pci/devices"
+)
+
+var (
+	pciBasePath     = "/sys/bus/pci/devices"
+	vfioDevicesRoot = "/dev/vfio/devices"
 )
 
 type PCIDevice struct {
@@ -164,6 +168,7 @@ func (dpi *PCIDevicePlugin) Allocate(_ context.Context, r *pluginapi.AllocateReq
 			}
 			allocatedDevices = append(allocatedDevices, devPCIAddress)
 			deviceSpecs = append(deviceSpecs, formatVFIODeviceSpecs(devID)...)
+			deviceSpecs = append(deviceSpecs, formatVFIOCdevDeviceSpecs(devPCIAddress)...)
 		}
 		containerResponse.Devices = deviceSpecs
 		envVar := make(map[string]string)
@@ -267,8 +272,17 @@ func discoverPermittedHostPCIDevices(supportedPCIDeviceMap map[string]string) ma
 		if resourceName, supported := supportedPCIDeviceMap[pciID]; supported {
 			// check device driver
 			driver, err := handler.GetDeviceDriver(pciBasePath, info.Name())
-			if err != nil || driver != "vfio-pci" {
+			if err != nil {
+				log.DefaultLogger().Reason(err).Errorf("failed to get driver for device: %s", info.Name())
 				return nil
+			}
+
+			// For devices without vfio-pci driver, check if they're NVIDIA vGPU VFs
+			if driver != "vfio-pci" {
+				if !shouldPermitNonVFIOPCI(driver, pciBasePath, info.Name(), pciID) {
+					log.DefaultLogger().V(9).Infof("Not supported driver %s, pci %s", driver, pciID)
+					return nil
+				}
 			}
 
 			pcidev := &PCIDevice{
@@ -283,11 +297,18 @@ func discoverPermittedHostPCIDevices(supportedPCIDeviceMap map[string]string) ma
 			pcidev.driver = driver
 			pcidev.numaNode = handler.GetDeviceNumaNode(pciBasePath, info.Name())
 			pciDevicesMap[resourceName] = append(pciDevicesMap[resourceName], pcidev)
+		} else {
+			log.DefaultLogger().V(9).Infof("Not supported %s", pciID)
 		}
 		return nil
-	})
+	},
+	)
 	if err != nil {
 		log.DefaultLogger().Reason(err).Errorf("failed to discover host devices")
 	}
 	return pciDevicesMap
+}
+
+func shouldPermitNonVFIOPCI(driver, pciBasePath, pciAddress, pciID string) bool {
+	return shouldPermitNvidia(driver, pciBasePath, pciAddress, pciID)
 }

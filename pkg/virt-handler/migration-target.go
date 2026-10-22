@@ -47,10 +47,13 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
+
 	"kubevirt.io/kubevirt/pkg/controller"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	"kubevirt.io/kubevirt/pkg/hypervisor"
+	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/vmisync"
 	"kubevirt.io/kubevirt/pkg/network/domainspec"
 	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
 	"kubevirt.io/kubevirt/pkg/pointer"
@@ -64,6 +67,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 	launcherclients "kubevirt.io/kubevirt/pkg/virt-handler/launcher-clients"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
+	"kubevirt.io/kubevirt/pkg/virt-handler/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -84,6 +88,7 @@ type MigrationTargetController struct {
 	netBindingPluginMemoryCalculator netBindingPluginMemoryCalculator
 	netConf                          netconf
 	passtRepairHandler               passtRepairTargetHandler
+	pluginExecutor                   plugins.NodeHookExecutor
 	vmiExpectations                  *controller.UIDTrackingControllerExpectations
 }
 
@@ -106,8 +111,9 @@ func NewMigrationTargetController(
 	netStat netstat,
 	netBindingPluginMemoryCalculator netBindingPluginMemoryCalculator,
 	passtRepairHandler passtRepairTargetHandler,
+	pluginStore cache.Store,
+	pluginExecutor plugins.NodeHookExecutor,
 ) (*MigrationTargetController, error) {
-
 	queue := workqueue.NewTypedRateLimitingQueueWithConfig[string](
 		workqueue.DefaultTypedControllerRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-handler-target"},
@@ -132,18 +138,19 @@ func NewMigrationTargetController(
 		netStat,
 		hypervisor.NewHypervisorNodeInformation(hypervisorName),
 		hypervisor.GetVirtRuntime(podIsolationDetector, hypervisorName),
+		pluginStore,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	containerDiskState := filepath.Join(virtPrivateDir, "container-disk-mount-state")
-	if err := os.MkdirAll(containerDiskState, 0700); err != nil {
+	if err := os.MkdirAll(containerDiskState, 0o700); err != nil {
 		return nil, err
 	}
 
 	hotplugState := filepath.Join(virtPrivateDir, "hotplug-volume-mount-state")
-	if err := os.MkdirAll(hotplugState, 0700); err != nil {
+	if err := os.MkdirAll(hotplugState, 0o700); err != nil {
 		return nil, err
 	}
 
@@ -156,6 +163,7 @@ func NewMigrationTargetController(
 		netBindingPluginMemoryCalculator: netBindingPluginMemoryCalculator,
 		netConf:                          netConf,
 		passtRepairHandler:               passtRepairHandler,
+		pluginExecutor:                   pluginExecutor,
 		vmiExpectations:                  controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectations()),
 	}
 
@@ -194,7 +202,88 @@ func domainIsActiveOnTarget(domain *api.Domain) bool {
 		return true
 	}
 	return false
+}
 
+func decentralizedMigrationMetadataUIDMatchesVMI(vmi *v1.VirtualMachineInstance, migrationMetadata *api.MigrationMetadata) bool {
+	state := vmi.Status.MigrationState
+	if state == nil {
+		return false
+	}
+	uid := migrationMetadata.UID
+	return vmi.IsDecentralizedMigration() &&
+		state.TargetState != nil && uid == state.TargetState.MigrationUID
+}
+
+func (c *MigrationTargetController) setDecentralizedMigrationProgressStatus(vmi *v1.VirtualMachineInstance, domain *api.Domain) {
+	if domain == nil ||
+		domain.Spec.Metadata.KubeVirt.Migration == nil ||
+		vmi.Status.MigrationState == nil ||
+		!c.isMigrationTarget(vmi) {
+		c.logger.Object(vmi).V(5).Info("not setting decentralized migration progress status, domain is nil or migration metadata is nil or migration state is nil or not a migration target")
+		return
+	}
+
+	migrationMetadata := domain.Spec.Metadata.KubeVirt.Migration
+	if !decentralizedMigrationMetadataUIDMatchesVMI(vmi, migrationMetadata) {
+		c.logger.Object(vmi).V(5).Info("not setting decentralized migration progress status, metadata UID does not match")
+		return
+	}
+	if migrationMetadata.StartTimestamp != nil {
+		vmi.Status.MigrationState.StartTimestamp = migrationMetadata.StartTimestamp
+	}
+
+	if migrationMetadata.Failed {
+		vmi.Status.MigrationState.Failed = true
+		vmi.Status.MigrationState.Completed = true
+		vmi.Status.MigrationState.EndTimestamp = migrationMetadata.EndTimestamp
+		vmi.Status.MigrationState.AbortStatus = v1.MigrationAbortStatus(migrationMetadata.AbortStatus)
+		vmi.Status.MigrationState.FailureReason = migrationMetadata.FailureReason
+		c.recorder.Event(vmi, k8sv1.EventTypeWarning, v1.Migrated.String(), fmt.Sprintf("VirtualMachineInstance migration uid %s failed. reason:%s", string(migrationMetadata.UID), migrationMetadata.FailureReason))
+		c.logger.Object(vmi).V(5).Infof("migration failed, completed: true, end timestamp: %v, abort status: %s, failure reason: %s", migrationMetadata.EndTimestamp, migrationMetadata.AbortStatus, migrationMetadata.FailureReason)
+	}
+
+	vmi.Status.MigrationState.Mode = migrationMetadata.Mode
+}
+
+func (c *MigrationTargetController) handleDecentralizedMigrationAbort(vmi *v1.VirtualMachineInstance, domain *api.Domain) error {
+	migrationState := vmi.Status.MigrationState
+	if !vmi.IsDecentralizedMigration() || migrationState == nil || !migrationState.AbortRequested || isMigrationDone(migrationState) {
+		c.logger.Object(vmi).V(5).Info("not aborting migration, not a decentralized migration or migration is done")
+		return nil
+	}
+
+	// set status from domain metadata
+	c.setDecentralizedMigrationProgressStatus(vmi, domain)
+
+	if !isMigrationDone(migrationState) {
+		if domainIsActiveOnTarget(domain) {
+			c.logger.Object(vmi).Info("not aborting migration, domain is active on target")
+			return nil
+		}
+
+		// The target migration proxy must stay up while the source migration is still
+		// running. Wait until the source reports completion (EndTimestamp synced onto
+		// the target VMI) before marking the target migration failed and cleaning up.
+		if migrationState.EndTimestamp == nil {
+			c.logger.Object(vmi).V(5).Info("waiting for source migration abort to complete before finalizing target abort")
+			c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second)
+			return nil
+		}
+
+		migrationState.Failed = true
+		migrationState.Completed = true
+		if migrationState.AbortStatus == "" {
+			migrationState.AbortStatus = v1.MigrationAbortSucceeded
+		}
+		if migrationState.FailureReason == "" {
+			migrationState.FailureReason = "Live migration has been aborted"
+		}
+		c.recorder.Event(vmi, k8sv1.EventTypeWarning, v1.Migrated.String(), VMIAbortingMigration)
+	} else {
+		c.logger.Object(vmi).V(5).Info("migration abort completed")
+	}
+
+	return nil
 }
 
 func (c *MigrationTargetController) ackMigrationCompletion(vmi *v1.VirtualMachineInstance, domain *api.Domain) {
@@ -227,10 +316,20 @@ func (c *MigrationTargetController) ackMigrationCompletion(vmi *v1.VirtualMachin
 	c.logger.Object(vmi).Info("The target node detected that the migration has completed")
 }
 
+func abortInProgress(vmi *v1.VirtualMachineInstance) bool {
+	migrationState := vmi.Status.MigrationState
+	return migrationState != nil && migrationState.AbortRequested && !isMigrationDone(migrationState)
+}
+
 func (c *MigrationTargetController) updateStatus(vmi *v1.VirtualMachineInstance, domain *api.Domain) (error, bool) {
 	if migrations.MigrationFailed(vmi) {
 		c.logger.Object(vmi).V(4).Info("migration has failed, nothing to report on the target node")
 		return nil, false
+	}
+
+	if !abortInProgress(vmi) {
+		// Only call this if abort is not in progress, the abort handler calls this function
+		c.setDecentralizedMigrationProgressStatus(vmi, domain)
 	}
 
 	domainExists := domain != nil
@@ -289,7 +388,7 @@ func (c *MigrationTargetController) updateStatus(vmi *v1.VirtualMachineInstance,
 		}
 	}
 
-	if migrations.IsMigrating(vmi) {
+	if migrations.IsMigrating(vmi) && !abortInProgress(vmi) {
 		c.logger.Object(vmi).V(4).Info("migration is already in progress")
 		return nil, false
 	}
@@ -410,6 +509,7 @@ func (c *MigrationTargetController) updateVMI(vmi *v1.VirtualMachineInstance, ol
 			}
 			return err
 		}
+		metrics.VMISynced(vmi.Namespace, vmi.Name)
 	}
 
 	return nil
@@ -417,11 +517,13 @@ func (c *MigrationTargetController) updateVMI(vmi *v1.VirtualMachineInstance, ol
 
 // finalCleanup is the last thing we run on finished migrations.
 // If the function completes successfully:
-// - On failure, virt-launcher will be notified and the virt-handler-managed volumes will be unmounted
-// - All caches related to the VMI and domain will be dropped
-// - The VMI will be removed from our informer
-// - The migration proxy for the VMI will be stopped
-// - The key will not be re-enqueued
+//   - On failure, virt-launcher will be notified, the virt-handler-managed volumes
+//     will be unmounted, VMI will be removed from store and launcher client will be closed
+//   - On success, the launcher client and its ghost record are retained until the
+//     VM controller takes over and performs domain teardown
+//   - Migration-target bookkeeping is removed and the VMI is updated in the informer
+//   - The migration proxy for the VMI will be stopped
+//   - The key will not be re-enqueued
 func (c *MigrationTargetController) finalCleanup(vmi *v1.VirtualMachineInstance, oldSpec *v1.VirtualMachineInstanceSpec, oldStatus *v1.VirtualMachineInstanceStatus, oldLabels map[string]string, domain *api.Domain) error {
 	if domainPausedFailedPostCopy(domain) {
 		if vmi.Status.Phase == v1.Running {
@@ -441,7 +543,6 @@ func (c *MigrationTargetController) finalCleanup(vmi *v1.VirtualMachineInstance,
 	}
 
 	defer c.migrationProxy.StopTargetListener(migrationProxyKey(vmi))
-	defer c.launcherClients.CloseLauncherClient(vmi)
 	client, err := c.launcherClients.GetLauncherClient(vmi)
 	if err != nil {
 		return err
@@ -467,6 +568,7 @@ func (c *MigrationTargetController) finalCleanup(vmi *v1.VirtualMachineInstance,
 		if err = c.domainStore.Delete(vmi); err != nil {
 			return err
 		}
+		c.launcherClients.CloseLauncherClient(vmi)
 	} else {
 		options := &cmdv1.VirtualMachineOptions{}
 		options.InterfaceMigration = domainspec.BindingMigrationByInterfaceName(vmi.Spec.Domain.Devices.Interfaces, c.clusterConfig.GetNetworkBindings())
@@ -488,6 +590,10 @@ func (c *MigrationTargetController) sync(vmi *v1.VirtualMachineInstance, domain 
 	oldStatus := vmi.Status
 	oldLabels := vmi.Labels
 	vmi = vmi.DeepCopy()
+
+	if err := c.handleDecentralizedMigrationAbort(vmi, domain); err != nil {
+		return err
+	}
 
 	// post-migration clean up
 	if vmi.Status.MigrationState != nil && vmi.Status.MigrationState.EndTimestamp != nil &&
@@ -546,6 +652,11 @@ func (c *MigrationTargetController) isMigrationTarget(vmi *v1.VirtualMachineInst
 	return migrationTargetNodeName == c.host
 }
 
+func needsCleanup(vmi *v1.VirtualMachineInstance) bool {
+	migrationState := vmi.Status.MigrationState
+	return migrationState != nil && isMigrationDone(migrationState)
+}
+
 func (c *MigrationTargetController) execute(key string) error {
 	vmi, vmiExists, err := c.getVMIFromCache(key)
 	if err != nil {
@@ -555,6 +666,7 @@ func (c *MigrationTargetController) execute(key string) error {
 	if !vmiExists {
 		c.logger.V(4).Infof("vmi for key %v does not exists", key)
 		c.vmiExpectations.DeleteExpectations(key)
+		metrics.ResetVMISync(key)
 		return nil
 	}
 
@@ -591,8 +703,10 @@ func (c *MigrationTargetController) execute(key string) error {
 		domain.Status.Status != ""
 
 	if domainExists && !domainAlive {
-		c.logger.V(4).Object(vmi).Info("domain is not alive")
-		return nil
+		if !abortInProgress(vmi) && !(vmi.IsDecentralizedMigration() && needsCleanup(vmi)) {
+			c.logger.V(4).Object(vmi).Info("domain is not alive")
+			return nil
+		}
 	}
 
 	if vmi.Status.MigrationState == nil {
@@ -636,24 +750,26 @@ func migrationProxyKey(vmi *v1.VirtualMachineInstance) string {
 }
 
 func (c *MigrationTargetController) handleTargetMigrationProxy(vmi *v1.VirtualMachineInstance) error {
-	var migrationTargetSockets []string
 	res, err := c.podIsolationDetector.Detect(vmi)
+	if err != nil {
+		return err
+	}
+	mountRoot, err := res.MountRoot()
 	if err != nil {
 		return err
 	}
 	vmiUID := migrationProxyKey(vmi)
 
-	socketFile := fmt.Sprintf(filepath.Join(c.virtLauncherFSRunDirPattern, "libvirt/virtqemud-sock"), res.Pid())
-	baseDir := fmt.Sprintf(filepath.Join(c.virtLauncherFSRunDirPattern, "kubevirt"), res.Pid())
-	migrationTargetSockets = append(migrationTargetSockets, socketFile)
+	migrationTargetSockets := []string{
+		"/run/libvirt/virtqemud-sock",
+	}
 
 	migrationPortsRange := migrationproxy.GetMigrationPortsList(vmi.IsBlockMigration())
 	for _, port := range migrationPortsRange {
 		key := migrationproxy.ConstructProxyKey(vmiUID, port)
-		destSocketFile := migrationproxy.SourceUnixFile(baseDir, key)
-		migrationTargetSockets = append(migrationTargetSockets, destSocketFile)
+		migrationTargetSockets = append(migrationTargetSockets, migrationproxy.SourceUnixFile("/run/kubevirt", key))
 	}
-	err = c.migrationProxy.StartTargetListener(vmiUID, migrationTargetSockets)
+	err = c.migrationProxy.StartTargetListener(vmiUID, mountRoot, migrationTargetSockets)
 	if err != nil {
 		return err
 	}
@@ -734,14 +850,14 @@ func (c *MigrationTargetController) unmountVolumes(originalVMI *v1.VirtualMachin
 		return err
 	}
 
-	// Mount hotplug disk
+	// Unmount all hotplug volumes
 	if attachmentPodUID := vmiCopy.Status.MigrationState.TargetAttachmentPodUID; attachmentPodUID != "" {
 		cgroupManager, err := getCgroupManager(vmiCopy, c.host, c.hypervisorNodeInfo, c.clusterConfig.AllowEmulation())
 		if err != nil {
 			return err
 		}
-		if err = c.hotplugVolumeMounter.Unmount(vmiCopy, cgroupManager); err != nil {
-			return fmt.Errorf("failed to unmount hotplug volumes: %v", err)
+		if err = c.hotplugVolumeMounter.UnmountAll(vmiCopy, cgroupManager); err != nil {
+			return fmt.Errorf("failed to unmount all hotplug volumes: %v", err)
 		}
 	}
 
@@ -760,14 +876,19 @@ func (c *MigrationTargetController) processVMI(vmi *v1.VirtualMachineInstance) (
 
 	// Once the migration target has been fully prepared (indicated by the
 	// migration proxy listening), there is nothing left for processVMI to
-	// do until the migration completes. Return early to avoid re-running
-	// the full preparation while QEMU is actively migrating.
+	// do until the migration completes or abort finalization runs.
+	// Return early to avoid re-running the full preparation while QEMU is
+	// actively migrating or while waiting for a decentralized abort to finish
+	// on the source (handleDecentralizedMigrationAbort requeues via AddAfter).
+	// Centralized aborts still fall through so checkLauncherClient can run.
 	// Return skipExpectations=true so the caller does not block the
 	// controller from processing external events (domain updates, sync
 	// controller VMI patches).
 	if len(c.migrationProxy.GetTargetListenerPorts(migrationProxyKey(vmi))) > 0 {
-		c.logger.Object(vmi).V(4).Info("migration target already prepared, nothing to do")
-		return nil, true
+		if !abortInProgress(vmi) || vmi.IsDecentralizedMigration() {
+			c.logger.Object(vmi).V(4).Info("migration target already prepared, nothing to do")
+			return nil, true
+		}
 	}
 
 	// In decentralized migrations the target VMI is created before the
@@ -817,9 +938,20 @@ func (c *MigrationTargetController) processVMI(vmi *v1.VirtualMachineInstance) (
 
 	vmi = vmi.DeepCopy()
 
+	if c.pluginExecutor != nil {
+		if err := c.pluginExecutor.CallNodeHooks(pluginv1alpha1.NodeHookPreMigrationTarget, vmi, c.host); err != nil {
+			return err, false
+		}
+	}
+
 	err = c.syncVolumes(vmi)
 	if goerror.Is(err, containerdisk.ErrWaitingForDisks) {
 		c.logger.Object(vmi).V(4).Info("waiting for container disks to become ready")
+		c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second*1)
+		return nil, true
+	}
+	if goerror.Is(err, hotplugvolume.ErrWaitingForHotplugMount) {
+		c.logger.Object(vmi).V(4).Infof("waiting for hotplug volumes to be mounted: %v", err)
 		c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second*1)
 		return nil, true
 	}
@@ -836,8 +968,13 @@ func (c *MigrationTargetController) processVMI(vmi *v1.VirtualMachineInstance) (
 		return err, false
 	}
 
-	options := virtualMachineOptions(nil, 0, nil, c.capabilities, c.clusterConfig)
+	options := virtualMachineOptions(vmi, nil, 0, nil, c.capabilities, c.clusterConfig)
 	options.InterfaceDomainAttachment = domainspec.DomainAttachmentByInterfaceName(vmi.Spec.Domain.Devices.Interfaces, c.clusterConfig.GetNetworkBindings())
+	pluginsJSON, err := c.serializePlugins()
+	if err != nil {
+		return err, false
+	}
+	options.PluginsJson = pluginsJSON
 
 	if c.clusterConfig.PasstBindingEnabled() {
 		if err = c.passtRepairHandler.HandleMigrationTarget(vmi, c.passtSocketDirOnHostForVMI); err != nil {
@@ -847,6 +984,10 @@ func (c *MigrationTargetController) processVMI(vmi *v1.VirtualMachineInstance) (
 
 	if err := client.SyncMigrationTarget(vmi, options); err != nil {
 		return fmt.Errorf("syncing migration target failed: %v", err), false
+	}
+
+	if err := c.hypervisorRuntime.AdjustResources(vmi, c.clusterConfig.GetConfig()); err != nil {
+		return fmt.Errorf("failed to adjust resources on migration target: %w", err), false
 	}
 
 	err = c.handleTargetMigrationProxy(vmi)
@@ -889,6 +1030,7 @@ func (c *MigrationTargetController) addDomainFunc(obj interface{}) {
 		c.queue.Add(key)
 	}
 }
+
 func (c *MigrationTargetController) deleteDomainFunc(obj interface{}) {
 	domain, ok := obj.(*api.Domain)
 	if !ok {
@@ -909,6 +1051,7 @@ func (c *MigrationTargetController) deleteDomainFunc(obj interface{}) {
 		c.queue.Add(key)
 	}
 }
+
 func (c *MigrationTargetController) updateDomainFunc(old, new interface{}) {
 	newDomain := new.(*api.Domain)
 	oldDomain := old.(*api.Domain)
@@ -948,7 +1091,7 @@ func (c *MigrationTargetController) reportDedicatedCPUSetForMigratingVMI(vmi *v1
 }
 
 func (c *MigrationTargetController) reportTargetTopologyForMigratingVMI(vmi *v1.VirtualMachineInstance) error {
-	options := virtualMachineOptions(nil, 0, nil, c.capabilities, c.clusterConfig)
+	options := virtualMachineOptions(vmi, nil, 0, nil, c.capabilities, c.clusterConfig)
 	topology, err := json.Marshal(options.Topology)
 	if err != nil {
 		return err
@@ -988,6 +1131,7 @@ func (c *MigrationTargetController) hotplugCPU(vmi *v1.VirtualMachineInstance, c
 	}
 
 	options := virtualMachineOptions(
+		vmi,
 		nil,
 		0,
 		nil,
@@ -1036,7 +1180,7 @@ func (c *MigrationTargetController) hotplugMemory(vmi *v1.VirtualMachineInstance
 		// TODO: Remove this fallback once VmiMemoryOverheadReport feature gate is GA
 		// and we are sure that all VMIs include the MemoryOverhead status field
 		overheadRatio := vmi.Labels[v1.MemoryHotplugOverheadRatioLabel]
-		requiredMemory = hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName).GetMemoryOverhead(vmi, runtime.GOARCH, &overheadRatio)
+		requiredMemory = hypervisor.NewLauncherHypervisorResources(c.clusterConfig.GetHypervisor().Name).GetMemoryOverhead(vmi, runtime.GOARCH, &overheadRatio)
 		requiredMemory.Add(
 			c.netBindingPluginMemoryCalculator.Calculate(vmi, c.clusterConfig.GetNetworkBindings()),
 		)
@@ -1049,7 +1193,7 @@ func (c *MigrationTargetController) hotplugMemory(vmi *v1.VirtualMachineInstance
 		return fmt.Errorf("amount of requested guest memory (%s) exceeds the launcher memory request (%s)", vmi.Spec.Domain.Memory.Guest.String(), podMemReqStr)
 	}
 
-	options := virtualMachineOptions(nil, 0, nil, c.capabilities, c.clusterConfig)
+	options := virtualMachineOptions(vmi, nil, 0, nil, c.capabilities, c.clusterConfig)
 
 	if err := client.SyncVirtualMachineMemory(vmi, options); err != nil {
 		// mark hotplug as failed
@@ -1102,6 +1246,12 @@ func (c *MigrationTargetController) finalizeMigration(vmi *v1.VirtualMachineInst
 	if cbt.HasCBTStateEnabled(vmi.Status.ChangedBlockTracking) {
 		cbt.SetCBTState(&vmi.Status.ChangedBlockTracking, v1.ChangedBlockTrackingInitializing)
 		c.logger.Object(vmi).Info("Set CBT to Initializing after migration for checkpoint redefinition")
+	}
+
+	if c.pluginExecutor != nil {
+		if err := c.pluginExecutor.CallNodeHooks(pluginv1alpha1.NodeHookPostMigrationTarget, vmi, c.host); err != nil {
+			return err
+		}
 	}
 
 	vmi.Status.MigrationState.Completed = true

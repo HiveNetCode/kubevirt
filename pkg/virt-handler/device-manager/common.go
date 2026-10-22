@@ -24,6 +24,7 @@ package device_manager
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -43,14 +44,16 @@ import (
 )
 
 type DeviceHandler interface {
-	GetDeviceIOMMUGroup(basepath string, pciAddress string) (string, error)
-	GetDeviceDriver(basepath string, pciAddress string) (string, error)
-	GetDeviceNumaNode(basepath string, pciAddress string) (numaNode int)
-	GetDevicePCIID(basepath string, pciAddress string) (string, error)
+	GetDeviceIOMMUGroup(basepath, pciAddress string) (string, error)
+	GetDeviceDriver(basepath, pciAddress string) (string, error)
+	GetDeviceNumaNode(basepath, pciAddress string) (numaNode int)
+	GetDevicePCIID(basepath, pciAddress string) (string, error)
 	GetMdevParentPCIAddr(mdevUUID string) (string, error)
 	CreateMDEVType(mdevType string, parentID string) error
 	RemoveMDEVType(mdevUUID string) error
 	ReadMDEVAvailableInstances(mdevType string, parentID string) (int, error)
+	HasVGPUProfile(basepath, pciAddress string) bool
+	IsPhysicalFunction(basepath, pciAddress string) bool
 }
 
 type DeviceUtilsHandler struct{}
@@ -196,6 +199,38 @@ func (h *DeviceUtilsHandler) ReadMDEVAvailableInstances(mdevType string, parentI
 	return i, nil
 }
 
+// Returns true if the device has a vGPU profile assigned (current_vgpu_type != 0).
+func (h *DeviceUtilsHandler) HasVGPUProfile(basepath, pciAddress string) bool {
+	vgpuTypePath := filepath.Join(basepath, pciAddress, "nvidia", "current_vgpu_type")
+	data, err := os.ReadFile(vgpuTypePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		log.DefaultLogger().Reason(err).Errorf("%s has no gpu profile", pciAddress)
+		return false
+	}
+
+	vgpuType := strings.TrimSpace(string(data))
+	return vgpuType != "" && vgpuType != "0"
+}
+
+// IsPhysicalFunction checks if a PCI device is an SR-IOV Physical Function by
+// looking for sriov_totalvfs subdirectories in its sysfs path. Only Physical Functions
+// have these subdirectories representing their associated Virtual Functions.
+func (h *DeviceUtilsHandler) IsPhysicalFunction(basepath, pciAddress string) bool {
+	fpath := filepath.Join(basepath, pciAddress, "sriov_totalvfs")
+
+	_, err := os.Stat(fpath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		log.DefaultLogger().Reason(err).Errorf("%s is not physical function", pciAddress)
+	}
+	return err == nil
+}
+
 func waitForGRPCServer(socketPath string, timeout time.Duration) error {
 	conn, err := gRPCConnect(socketPath, timeout)
 	if err != nil {
@@ -252,6 +287,39 @@ func formatVFIODeviceSpecs(devID string) []*v1beta1.DeviceSpec {
 		ContainerPath: vfioDevice,
 		Permissions:   "mrw",
 	})
+	return devSpecs
+}
+
+func formatVFIOCdevDeviceSpecs(pciAddress string) []*v1beta1.DeviceSpec {
+	vfioDevDir := filepath.Join(pciBasePath, pciAddress, "vfio-dev")
+	entries, err := os.ReadDir(vfioDevDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.DefaultLogger().V(4).Infof("No VFIO cdev found for %s", pciAddress)
+		} else {
+			log.DefaultLogger().Reason(err).Errorf("Failed to read VFIO cdev directory for %s", pciAddress)
+		}
+		return nil
+	}
+
+	devSpecs := make([]*v1beta1.DeviceSpec, 0, len(entries))
+	for _, entry := range entries {
+		cdevPath := filepath.Join(vfioDevicesRoot, entry.Name())
+		// Only add the device spec if the actual device file exists
+		if _, err := os.Stat(cdevPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				log.DefaultLogger().V(4).Infof("VFIO cdev %s does not exist, skipping", cdevPath)
+			} else {
+				log.DefaultLogger().Reason(err).Warningf("Failed to stat VFIO cdev %s", cdevPath)
+			}
+			continue
+		}
+		devSpecs = append(devSpecs, &v1beta1.DeviceSpec{
+			HostPath:      cdevPath,
+			ContainerPath: cdevPath,
+			Permissions:   "mrw",
+		})
+	}
 	return devSpecs
 }
 

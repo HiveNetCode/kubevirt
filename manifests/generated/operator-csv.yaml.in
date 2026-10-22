@@ -694,6 +694,14 @@ spec:
           - delete
           - patch
         - apiGroups:
+          - template.kubevirt.io
+          resources:
+          - virtualmachinetemplates
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - pool.kubevirt.io
           resources:
           - virtualmachinepools
@@ -858,7 +866,6 @@ spec:
           - virtualmachineinstances
           verbs:
           - update
-          - patch
           - list
           - watch
         - apiGroups:
@@ -919,11 +926,13 @@ spec:
           - watch
           - patch
         - apiGroups:
-          - apps
+          - plugin.kubevirt.io
           resources:
-          - controllerrevisions
+          - plugins
           verbs:
           - get
+          - list
+          - watch
         - apiGroups:
           - export.kubevirt.io
           resources:
@@ -1110,6 +1119,19 @@ spec:
           - watch
           - deletecollection
         - apiGroups:
+          - plugin.kubevirt.io
+          resources:
+          - plugins
+          verbs:
+          - get
+          - delete
+          - create
+          - update
+          - patch
+          - list
+          - watch
+          - deletecollection
+        - apiGroups:
           - export.kubevirt.io
           resources:
           - virtualmachineexports
@@ -1441,6 +1463,14 @@ spec:
           - migrations.kubevirt.io
           resources:
           - migrationpolicies
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - plugin.kubevirt.io
+          resources:
+          - plugins
           verbs:
           - get
           - list
@@ -1628,6 +1658,7 @@ spec:
           - kubevirt-virt-handler-server-certs
           - kubevirt-virt-handler-migration-client-certs
           - kubevirt-virt-handler-vsock-client-certs
+          - kubevirt-virt-handler-monitoring-client-certs
           - kubevirt-operator-certs
           - kubevirt-virt-api-certs
           - kubevirt-controller-certs

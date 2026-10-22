@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "bindingplugin.go",
         "bindingplugin_macvtap.go",
-        "bindingplugin_passt.go",
         "bindingplugin_slirp.go",
         "dual_stack_cluster.go",
         "framework.go",
@@ -17,7 +16,6 @@ go_library(
         "networkpolicy.go",
         "passt.go",
         "port_forward.go",
-        "primary_pod_network.go",
         "probes.go",
         "services.go",
         "sriov.go",

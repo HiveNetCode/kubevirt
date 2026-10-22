@@ -111,7 +111,7 @@ functest-image-push: functest-image-build
 	hack/func-tests-image.sh push
 
 conformance:
-	hack/dockerized "export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} SKIP_OUTSIDE_CONN_TESTS=${SKIP_OUTSIDE_CONN_TESTS} RUN_ON_ARM64_INFRA=${RUN_ON_ARM64_INFRA} SKIP_BLOCK_STORAGE_TESTS=${SKIP_BLOCK_STORAGE_TESTS} SKIP_SNAPSHOT_STORAGE_TESTS=${SKIP_SNAPSHOT_STORAGE_TESTS} KUBEVIRT_E2E_FOCUS=${KUBEVIRT_E2E_FOCUS} DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} && hack/conformance.sh"
+	hack/dockerized "export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PRIMARY_NETWORK_BINDING_PLUGIN=${PRIMARY_NETWORK_BINDING_PLUGIN} SKIP_OUTSIDE_CONN_TESTS=${SKIP_OUTSIDE_CONN_TESTS} RUN_ON_ARM64_INFRA=${RUN_ON_ARM64_INFRA} SKIP_BLOCK_STORAGE_TESTS=${SKIP_BLOCK_STORAGE_TESTS} SKIP_SNAPSHOT_STORAGE_TESTS=${SKIP_SNAPSHOT_STORAGE_TESTS} KUBEVIRT_E2E_FOCUS=${KUBEVIRT_E2E_FOCUS} DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} && hack/conformance.sh"
 
 perftest: build-functests
 	hack/perftests.sh
@@ -141,7 +141,8 @@ deps-sync:
 	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh --sync-only && ./hack/bazel-generate.sh"
 
 rpm-deps:
-	SYNC_VENDOR=true hack/dockerized "KUBEVIRT_CENTOS_STREAM_VERSION=${KUBEVIRT_CENTOS_STREAM_VERSION} CUSTOM_REPO=${CUSTOM_REPO} SINGLE_ARCH=${SINGLE_ARCH} BASESYSTEM=${BASESYSTEM} LIBVIRT_VERSION=${LIBVIRT_VERSION} QEMU_VERSION=${QEMU_VERSION} SEABIOS_VERSION=${SEABIOS_VERSION} EDK2_VERSION=${EDK2_VERSION} LIBGUESTFS_VERSION=${LIBGUESTFS_VERSION} GUESTFSTOOLS_VERSION=${GUESTFSTOOLS_VERSION} PASST_VERSION=${PASST_VERSION} VIRTIOFSD_VERSION=${VIRTIOFSD_VERSION} SWTPM_VERSION=${SWTPM_VERSION} LIBNBD_VERSION=${LIBNBD_VERSION} ./hack/rpm-deps.sh"
+	SYNC_VENDOR=true hack/dockerized "KUBEVIRT_CENTOS_STREAM_VERSION=${KUBEVIRT_CENTOS_STREAM_VERSION} CUSTOM_REPO=${CUSTOM_REPO} SINGLE_ARCH=${SINGLE_ARCH} BASESYSTEM=${BASESYSTEM} LIBVIRT_VERSION=${LIBVIRT_VERSION} QEMU_VERSION=${QEMU_VERSION} SEABIOS_VERSION=${SEABIOS_VERSION} EDK2_VERSION=${EDK2_VERSION} LIBGUESTFS_VERSION=${LIBGUESTFS_VERSION} GUESTFSTOOLS_VERSION=${GUESTFSTOOLS_VERSION} PASST_VERSION=${PASST_VERSION} VIRTIOFSD_VERSION=${VIRTIOFSD_VERSION} SWTPM_VERSION=${SWTPM_VERSION} LIBNBD_VERSION=${LIBNBD_VERSION} KUBEVIRT_CROSS_ARCH_EMULATION=${KUBEVIRT_CROSS_ARCH_EMULATION} ./hack/rpm-deps.sh"
+	$(MAKE) generate
 
 rpm-deps-cs9:
 	$(MAKE) rpm-deps KUBEVIRT_CENTOS_STREAM_VERSION=9
@@ -193,8 +194,11 @@ builder-build:
 builder-publish:
 	./hack/builder/publish.sh
 
-builder-build-cs10:
-	./hack/builder/build-cs10.sh
+builder-build-centos-stream-10:
+	./hack/builder/build-centos-stream-10.sh
+
+builder-publish-centos-stream-10:
+	./hack/builder/publish-centos-stream-10.sh
 
 olm-verify:
 	hack/dockerized "./hack/olm.sh verify"
@@ -231,6 +235,7 @@ fmt: format
 
 lint:
 	hack/dockerized "hack/lint-test-cleanup-label.sh"
+	hack/dockerized "hack/lint-newcirros-deprecation.sh"
 	hack/dockerized "hack/golangci-lint.sh"
 	hack/dockerized "monitoringlinter ./pkg/..."
 	hack/dockerized "hack/license-header-check.sh"
@@ -245,6 +250,16 @@ gofumpt:
 
 update-generated-api-testdata:
 	./hack/update-generated-api-testdata.sh
+
+feature-gate-report:
+	hack/dockerized "bazel build //tools/feature-gate-report && \
+		./bazel-bin/tools/feature-gate-report/feature-gate-report_/feature-gate-report $(FEATURE_GATE_REPORT_ARGS)"
+
+vmlog-checker:
+	@echo "Building vmlog-checker..."
+	@CGO_ENABLED=0 go build -o tools/vmlog-checker/vmlog-checker tools/vmlog-checker/main.go
+	@echo "Built successfully: tools/vmlog-checker/vmlog-checker"
+	@echo "Usage: ./tools/vmlog-checker/vmlog-checker --log <file> [options]"
 
 .PHONY: \
 	build-verify \
@@ -287,4 +302,6 @@ update-generated-api-testdata:
 	rpm-deps-cs9 \
 	rpm-deps-cs10 \
 	rpm-deps-all \
+	feature-gate-report \
+	vmlog-checker \
 	$(NULL)

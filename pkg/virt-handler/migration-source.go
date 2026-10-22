@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
@@ -38,16 +37,20 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
+
 	"kubevirt.io/kubevirt/pkg/controller"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	"kubevirt.io/kubevirt/pkg/hypervisor"
+	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/vmisync"
 	"kubevirt.io/kubevirt/pkg/pointer"
-	"kubevirt.io/kubevirt/pkg/util/migrations"
+	migrationsutil "kubevirt.io/kubevirt/pkg/util/migrations"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 	launcherclients "kubevirt.io/kubevirt/pkg/virt-handler/launcher-clients"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
+	"kubevirt.io/kubevirt/pkg/virt-handler/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -59,6 +62,7 @@ type passtRepairSourceHandler interface {
 
 type MigrationSourceController struct {
 	*BaseController
+	pluginExecutor     plugins.NodeHookExecutor
 	vmiExpectations    *controller.UIDTrackingControllerExpectations
 	passtRepairHandler passtRepairSourceHandler
 }
@@ -76,6 +80,8 @@ func NewMigrationSourceController(
 	virtLauncherFSRunDirPattern string,
 	netStat netstat,
 	passtRepairHandler passtRepairSourceHandler,
+	pluginStore cache.Store,
+	pluginExecutor plugins.NodeHookExecutor,
 ) (*MigrationSourceController, error) {
 
 	queue := workqueue.NewTypedRateLimitingQueueWithConfig[string](
@@ -102,6 +108,7 @@ func NewMigrationSourceController(
 		netStat,
 		hypervisor.NewHypervisorNodeInformation(hypervisorName),
 		hypervisor.GetVirtRuntime(podIsolationDetector, hypervisorName),
+		pluginStore,
 	)
 	if err != nil {
 		return nil, err
@@ -109,6 +116,7 @@ func NewMigrationSourceController(
 
 	c := &MigrationSourceController{
 		BaseController:     baseCtrl,
+		pluginExecutor:     pluginExecutor,
 		vmiExpectations:    controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectations()),
 		passtRepairHandler: passtRepairHandler,
 	}
@@ -198,14 +206,11 @@ func (c *MigrationSourceController) setMigrationProgressStatus(vmi *v1.VirtualMa
 	vmi.Status.MigrationState.Failed = migrationMetadata.Failed
 
 	if migrationMetadata.Failed {
+		vmi.Status.MigrationState.Completed = true
 		vmi.Status.MigrationState.EndTimestamp = migrationMetadata.EndTimestamp
+		vmi.Status.MigrationState.AbortStatus = v1.MigrationAbortStatus(migrationMetadata.AbortStatus)
 		vmi.Status.MigrationState.FailureReason = migrationMetadata.FailureReason
 		c.recorder.Event(vmi, k8sv1.EventTypeWarning, v1.Migrated.String(), fmt.Sprintf("VirtualMachineInstance migration uid %s failed. reason:%s", string(migrationMetadata.UID), migrationMetadata.FailureReason))
-	}
-
-	vmi.Status.MigrationState.AbortStatus = v1.MigrationAbortStatus(migrationMetadata.AbortStatus)
-	if migrationMetadata.AbortStatus == string(v1.MigrationAbortSucceeded) {
-		vmi.Status.MigrationState.EndTimestamp = migrationMetadata.EndTimestamp
 	}
 
 	vmi.Status.MigrationState.Mode = migrationMetadata.Mode
@@ -371,6 +376,7 @@ func (c *MigrationSourceController) sync(vmi *v1.VirtualMachineInstance, domain 
 			c.vmiExpectations.SetExpectations(key, 0, 0)
 			return err
 		}
+		metrics.VMISynced(vmi.Namespace, vmi.Name)
 	}
 
 	if syncErr != nil {
@@ -400,6 +406,9 @@ func (c *MigrationSourceController) execute(key string) error {
 		!vmi.IsDecentralizedMigration() && vmi.IsFinal()) ||
 		vmi.DeletionTimestamp != nil {
 		c.logger.V(4).Infof("vmi for key %v is terminating, succeeded or does not exists", key)
+		if !vmiExists {
+			metrics.ResetVMISync(key)
+		}
 		return nil
 	}
 
@@ -454,9 +463,10 @@ func (c *MigrationSourceController) handleSourceMigrationProxy(vmi *v1.VirtualMa
 	if err != nil {
 		return err
 	}
-	// the migration-proxy is no longer shared via host mount, so we
-	// pass in the virt-launcher's baseDir to reach the unix sockets.
-	baseDir := fmt.Sprintf(filepath.Join(c.virtLauncherFSRunDirPattern, "kubevirt"), res.Pid())
+	mountRoot, err := res.MountRoot()
+	if err != nil {
+		return err
+	}
 	if vmi.Status.MigrationState.TargetDirectMigrationNodePorts == nil {
 		return errWaitingForTargetPorts
 	}
@@ -465,7 +475,7 @@ func (c *MigrationSourceController) handleSourceMigrationProxy(vmi *v1.VirtualMa
 		string(vmi.UID),
 		vmi.Status.MigrationState.TargetNodeAddress,
 		vmi.Status.MigrationState.TargetDirectMigrationNodePorts,
-		baseDir,
+		mountRoot,
 	)
 	if err != nil {
 		return err
@@ -486,7 +496,7 @@ func (c *MigrationSourceController) migrateVMI(vmi *v1.VirtualMachineInstance, d
 	}
 
 	if vmi.Status.MigrationState.AbortRequested {
-		err = c.handleMigrationAbort(vmi, client)
+		err = c.handleMigrationAbort(vmi, domain, client)
 		return err
 	}
 
@@ -505,11 +515,11 @@ func (c *MigrationSourceController) migrateVMI(vmi *v1.VirtualMachineInstance, d
 		return fmt.Errorf("failed to handle migration proxy: %v", err)
 	}
 
-	var migrationConfiguration *v1.MigrationConfiguration
-	if vmi.Status.MigrationState.MigrationConfiguration == nil {
-		migrationConfiguration = c.clusterConfig.GetMigrationConfiguration()
+	var migrationConfiguration *v1.VMIMConfigurationOptions
+	if vmi.Status.MigrationState.VMIMConfigurationOptions == nil {
+		migrationConfiguration = migrationsutil.ToVMIMConfigurationOptions(c.clusterConfig.GetMigrationConfiguration())
 	} else {
-		migrationConfiguration = vmi.Status.MigrationState.MigrationConfiguration.DeepCopy()
+		migrationConfiguration = vmi.Status.MigrationState.VMIMConfigurationOptions.DeepCopy()
 	}
 
 	// This check is only for backward compatibility.
@@ -519,15 +529,54 @@ func (c *MigrationSourceController) migrateVMI(vmi *v1.VirtualMachineInstance, d
 	if migrationConfiguration.AllowWorkloadDisruption == nil {
 		migrationConfiguration.AllowWorkloadDisruption = pointer.P(*migrationConfiguration.AllowPostCopy)
 	}
+	if migrationConfiguration.MaxDowntimeMs == nil {
+		migrationConfiguration.MaxDowntimeMs = pointer.P(virtconfig.DefaultMigrationMaxDowntimeMs)
+	}
 
 	options := &cmdclient.MigrationOptions{
 		Bandwidth:               *migrationConfiguration.BandwidthPerMigration,
 		ProgressTimeout:         *migrationConfiguration.ProgressTimeout,
 		CompletionTimeoutPerGiB: *migrationConfiguration.CompletionTimeoutPerGiB,
+		MaxDowntimeMs:           *migrationConfiguration.MaxDowntimeMs,
 		UnsafeMigration:         *migrationConfiguration.UnsafeMigrationOverride,
 		AllowAutoConverge:       *migrationConfiguration.AllowAutoConverge,
 		AllowPostCopy:           *migrationConfiguration.AllowPostCopy,
 		AllowWorkloadDisruption: *migrationConfiguration.AllowWorkloadDisruption,
+	}
+
+	if c.clusterConfig.MigrationStallDetectionEnabled() {
+		applyExperimentalMigrationDefaults(migrationConfiguration)
+		stallDetector := migrationConfiguration.ExperimentalMigrationOptions.StallDetector
+		ewmaAlpha, err := virtconfig.ParseFactor(*stallDetector.EwmaAlpha, virtconfig.StallDetectorFactorPrecision)
+		if err != nil {
+			return fmt.Errorf("invalid ewmaAlpha: %w", err)
+		}
+		precopyPossibleFactor, err := virtconfig.ParseFactor(*stallDetector.PrecopyPossibleFactor, virtconfig.StallDetectorFactorPrecision)
+		if err != nil {
+			return fmt.Errorf("invalid precopyPossibleFactor: %w", err)
+		}
+		patienceWindowDecayFactor, err := virtconfig.ParseFactor(*stallDetector.PatienceWindowDecayFactor, virtconfig.StallDetectorFactorPrecision)
+		if err != nil {
+			return fmt.Errorf("invalid patienceWindowDecayFactor: %w", err)
+		}
+		completionTimeoutFactor, err := virtconfig.ParseFactor(*stallDetector.CompletionTimeoutFactor, virtconfig.StallDetectorFactorPrecision)
+		if err != nil {
+			return fmt.Errorf("invalid completionTimeoutFactor: %w", err)
+		}
+		options.StallDetectorOptions = &cmdclient.StallDetectorOptions{
+			StallMargin:               float64(*stallDetector.StallMargin) / 100,
+			StallProgressTimeout:      *stallDetector.StallProgressTimeout,
+			SwitchoverTimeout:         *stallDetector.SwitchoverTimeout,
+			EwmaAlpha:                 ewmaAlpha,
+			PrecopyPossibleFactor:     precopyPossibleFactor,
+			PatienceWindowDecayFactor: patienceWindowDecayFactor,
+			SearchLocalMinima:         *stallDetector.SearchLocalMinima,
+			CompletionTimeoutFactor:   completionTimeoutFactor,
+		}
+	}
+
+	if exp := migrationConfiguration.ExperimentalMigrationOptions; exp != nil && exp.Compression != nil {
+		options.Compression = pointer.P(string(*exp.Compression))
 	}
 
 	configureParallelMigrationThreads(options, vmi)
@@ -548,6 +597,12 @@ func (c *MigrationSourceController) migrateVMI(vmi *v1.VirtualMachineInstance, d
 	if c.clusterConfig.PasstBindingEnabled() {
 		if err = c.passtRepairHandler.HandleMigrationSource(vmi, c.passtSocketDirOnHostForVMI); err != nil {
 			c.logger.Object(vmi).Warningf("failed to call passt-repair for migration source, %v", err)
+		}
+	}
+
+	if c.pluginExecutor != nil {
+		if err := c.pluginExecutor.CallNodeHooks(pluginv1alpha1.NodeHookPreMigrationSource, vmiCopy, c.host); err != nil {
+			return err
 		}
 	}
 
@@ -614,21 +669,66 @@ func (c *MigrationSourceController) updateDomainFunc(_, new interface{}) {
 	}
 }
 
-func (c *MigrationSourceController) handleMigrationAbort(vmi *v1.VirtualMachineInstance, client cmdclient.LauncherClient) error {
-	if vmi.Status.MigrationState.AbortStatus == v1.MigrationAbortInProgress || vmi.Status.MigrationState.AbortStatus == v1.MigrationAbortSucceeded {
+func (c *MigrationSourceController) handleMigrationAbort(vmi *v1.VirtualMachineInstance, domain *api.Domain, client cmdclient.LauncherClient) error {
+	// Check both the domain metadata and the VMI status to avoid redundant cancel RPCs.
+	// The domain metadata reflects the launcher's abort status before the API server round-trip.
+	abortHandled := func(status v1.MigrationAbortStatus) bool {
+		return status == v1.MigrationAbortInProgress || status == v1.MigrationAbortSucceeded
+	}
+	if domain != nil && domain.Spec.Metadata.KubeVirt.Migration != nil &&
+		abortHandled(v1.MigrationAbortStatus(domain.Spec.Metadata.KubeVirt.Migration.AbortStatus)) {
+		return nil
+	}
+	if abortHandled(vmi.Status.MigrationState.AbortStatus) {
 		return nil
 	}
 
 	if err := client.CancelVirtualMachineMigration(vmi); err != nil {
-		if err.Error() == migrations.CancelMigrationFailedVmiNotMigratingErr {
-			// If migration did not even start there is no need to cancel it
-			c.logger.Object(vmi).Infof("skipping migration cancellation since vmi is not migrating")
-		}
 		return err
 	}
 
 	c.recorder.Event(vmi, k8sv1.EventTypeNormal, v1.Migrating.String(), VMIAbortingMigration)
 	return nil
+}
+
+func applyExperimentalMigrationDefaults(opts *v1.VMIMConfigurationOptions) {
+	if opts.ExperimentalMigrationOptions == nil {
+		opts.ExperimentalMigrationOptions = &v1.ExperimentalMigrationOptions{}
+	}
+	opts.ExperimentalMigrationOptions.StallDetector = applyStallDetectorDefaults(
+		opts.ExperimentalMigrationOptions.StallDetector,
+	)
+}
+
+func applyStallDetectorDefaults(sd *v1.StallDetectorOptions) *v1.StallDetectorOptions {
+	if sd == nil {
+		sd = &v1.StallDetectorOptions{}
+	}
+	if sd.StallMargin == nil {
+		sd.StallMargin = pointer.P(virtconfig.DefaultStallMargin)
+	}
+	if sd.StallProgressTimeout == nil {
+		sd.StallProgressTimeout = pointer.P(virtconfig.DefaultStallProgressTimeout)
+	}
+	if sd.SwitchoverTimeout == nil {
+		sd.SwitchoverTimeout = pointer.P(virtconfig.DefaultSwitchoverTimeout)
+	}
+	if sd.EwmaAlpha == nil {
+		sd.EwmaAlpha = pointer.P(virtconfig.DefaultEwmaAlpha)
+	}
+	if sd.PrecopyPossibleFactor == nil {
+		sd.PrecopyPossibleFactor = pointer.P(virtconfig.DefaultPrecopyPossibleFactor)
+	}
+	if sd.PatienceWindowDecayFactor == nil {
+		sd.PatienceWindowDecayFactor = pointer.P(virtconfig.DefaultPatienceWindowDecayFactor)
+	}
+	if sd.SearchLocalMinima == nil {
+		sd.SearchLocalMinima = pointer.P(virtconfig.DefaultSearchLocalMinima)
+	}
+	if sd.CompletionTimeoutFactor == nil {
+		sd.CompletionTimeoutFactor = pointer.P(virtconfig.DefaultCompletionTimeoutFactor)
+	}
+	return sd
 }
 
 func configureParallelMigrationThreads(options *cmdclient.MigrationOptions, vm *v1.VirtualMachineInstance) {
@@ -637,8 +737,8 @@ func configureParallelMigrationThreads(options *cmdclient.MigrationOptions, vm *
 	if cpuLimit, cpuLimitExists := vm.Spec.Domain.Resources.Limits[k8sv1.ResourceCPU]; cpuLimitExists && !cpuLimit.IsZero() {
 		return
 	}
-
-	if options.AllowPostCopy {
+	// Dedicated CPUs are also fully allocating each vCPU for compute.
+	if vm.IsCPUDedicated() {
 		return
 	}
 

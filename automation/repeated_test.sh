@@ -190,7 +190,9 @@ fi
 NUM_TESTS=${NUM_TESTS-5}
 echo "Number of per lane runs: $NUM_TESTS"
 
-if should_skip_test_run_due_to_too_many_tests "${NEW_TESTS}"; then
+if [[ "${JOB_NAME-}" == *dequarantine* ]]; then
+    echo "Dequarantine lane: skipping repetition count check"
+elif should_skip_test_run_due_to_too_many_tests "${NEW_TESTS}"; then
     echo "Skipping run due to number of tests in total being too high for repeated run."
     exit 0
 fi
@@ -235,10 +237,20 @@ add_to_label_filter() {
     fi
 }
 
+add_feature_gate() {
+  if [ -z "${FEATURE_GATES:-}" ]; then
+    export FEATURE_GATES="$1"
+  else
+    export FEATURE_GATES="$FEATURE_GATES,$1"
+  fi
+}
+
+add_feature_gate "Plugins"
+
 label_filter="${KUBEVIRT_LABEL_FILTER:-}"
 
 # skip certain tests on flake lane
-add_to_label_filter "(!(SRIOV,Multus,Windows,GPU,VGPU))" "&&"
+add_to_label_filter "(!(SRIOV,Multus,Windows,GPU,VGPU,in-place-hotplug-NICs,DRA-GPU))" "&&"
 
 add_to_label_filter '(!QUARANTINE)' '&&'
 add_to_label_filter '(!no-flake-check)' '&&'
@@ -248,6 +260,8 @@ add_to_label_filter '(!requireHugepages1Gi)' '&&'
 add_to_label_filter '(!USB)' '&&'
 add_to_label_filter '(!requires-arm64)' '&&'
 add_to_label_filter '(!requires-s390x)' '&&'
+add_to_label_filter '(!requires-cross-arch-emulation)' '&&'
+add_to_label_filter '(!RequiresPersistentReservation)' '&&'
 rwofs_sc=$(jq -er .storageRWOFileSystem "${kubevirt_test_config}")
 if [[ "${rwofs_sc}" == "local" ]]; then
     # local is a primitive non CSI storage class that doesn't support expansion

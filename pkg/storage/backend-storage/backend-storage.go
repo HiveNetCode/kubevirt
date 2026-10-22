@@ -45,7 +45,6 @@ import (
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/tpm"
-	"kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
@@ -209,9 +208,6 @@ func buildRecoveryJob(jobName, launcherImage string, migration *corev1.VirtualMa
 					RestartPolicy: v1.RestartPolicyNever,
 					SecurityContext: &v1.PodSecurityContext{
 						RunAsNonRoot: pointer.P(true),
-						RunAsUser:    pointer.P(int64(util.NonRootUID)),
-						RunAsGroup:   pointer.P(int64(util.NonRootUID)),
-						FSGroup:      pointer.P(int64(util.NonRootUID)),
 						SeccompProfile: &v1.SeccompProfile{
 							Type: v1.SeccompProfileTypeRuntimeDefault,
 						},
@@ -536,6 +532,11 @@ func (bs *BackendStorage) createPVC(vmi *corev1.VirtualMachineInstance, labels m
 	// This helps avoid issues with provisioners that reject the hardcoded 10Mi PVC size used here.
 	labels[storagetypes.LabelApplyStorageProfile] = "true"
 
+	pvcSize := resource.MustParse(PVCSize)
+	if cbt.HasCBTStateEnabled(vmi.Status.ChangedBlockTracking) {
+		pvcSize.Add(resource.MustParse(cbt.CBTBackendStateOverhead))
+	}
+
 	pvc := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName:    basePVC(vmi) + "-",
@@ -545,7 +546,7 @@ func (bs *BackendStorage) createPVC(vmi *corev1.VirtualMachineInstance, labels m
 		Spec: v1.PersistentVolumeClaimSpec{
 			AccessModes: []v1.PersistentVolumeAccessMode{accessMode},
 			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse(PVCSize)},
+				Requests: v1.ResourceList{v1.ResourceStorage: pvcSize},
 			},
 			StorageClassName: &storageClass,
 			VolumeMode:       &mode,

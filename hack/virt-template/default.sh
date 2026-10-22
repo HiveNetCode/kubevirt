@@ -1,4 +1,4 @@
 #!/bin/bash
 
-virt_template_version=${VIRT_TEMPLATE_VERSION:-"v0.1.8"}
-virt_template_yaml_sha256=${VIRT_TEMPLATE_YAML_SHA256:-"b9e7eed0add0f013c81e3a41618ec69b3f226e33008311255204cb3c32d6d9f1"}
+virt_template_version=${VIRT_TEMPLATE_VERSION:-"v0.2.3"}
+virt_template_yaml_sha256=${VIRT_TEMPLATE_YAML_SHA256:-"b752d20e00ed0f8d85693cb9f136a6cfb509fc869d4ff56a3e524e96ecebe4a2"}

@@ -8,9 +8,12 @@ linters:
     - dupl
     - errcheck
     - exhaustive
+    - forbidigo
     - funlen
     - gochecknoinits
-    - goconst
+    # TODO: Re-enable goconst in a follow-up PR after addressing the larger
+    # finding set introduced by newer golangci-lint
+    # - goconst
     - gocritic
     - gocyclo
     - goheader
@@ -32,12 +35,22 @@ linters:
   settings:
     dupl:
       threshold: 100
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^Skip$
+          pkg: ^github\.com/onsi/ginkgo/v2$
+          msg: >-
+            Use labels/decorators instead of runtime Skip().
+            Runtime skips silently suppress tests, making it easy to
+            unknowingly stop running tests you care about.
+            Labeling shifts the choice of what to run to the test executor.
     funlen:
       lines: 100
       statements: 50
-    goconst:
-      min-len: 2
-      min-occurrences: 2
+    # goconst:
+    #   min-len: 2
+    #   min-occurrences: 2
     gocritic:
       disabled-checks:
         - dupImport # https://github.com/go-critic/go-critic/issues/845
@@ -107,7 +120,6 @@ linters:
       - examples$
       - (^|/)vendor/
       - tests/network/bindingplugin_macvtap\.go$
-      - tests/network/bindingplugin_passt\.go$
       - tests/network/bindingplugin_slirp\.go$
       - tests/network/dual_stack_cluster\.go$
       - tests/network/framework\.go$
@@ -115,7 +127,6 @@ linters:
       - tests/network/hotplug_sriov\.go$
       - tests/network/link_state\.go$
       - tests/network/networkpolicy\.go$
-      - tests/network/passt\.go$
       - tests/network/port_forward\.go$
       - tests/network/primary_pod_network\.go$
       - tests/network/probes\.go$

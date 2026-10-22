@@ -61,7 +61,7 @@ var _ = Describe("Backup", func() {
 		mockConn = cli.NewMockConnection(ctrl)
 		mockDomain = cli.NewMockVirDomain(ctrl)
 		metadataCache = metadata.NewCache()
-		manager = NewStorageManager(mockConn, metadataCache)
+		manager = NewStorageManager(mockConn, metadataCache, nil)
 
 		vmi = &v1.VirtualMachineInstance{
 			ObjectMeta: metav1.ObjectMeta{
@@ -258,9 +258,15 @@ var _ = Describe("Backup", func() {
 			It("should freeze, start backup, and thaw", func() {
 				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().GetXMLDesc(gomock.Any()).Return(domainXML, nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"thawed"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSFreeze(gomock.Any(), gomock.Any()).Return(nil)
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().BackupBegin(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"frozen"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSThaw(gomock.Any(), gomock.Any()).Return(nil)
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().Free().Return(nil)
 
 				err := manager.BackupVirtualMachine(vmi, backupOptions)
@@ -280,21 +286,23 @@ var _ = Describe("Backup", func() {
 		})
 
 		Context("when freeze fails", func() {
-			It("should continue backup without freeze and skip thaw", func() {
+			It("should continue backup with QuiesceStatus=Failed", func() {
 				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().GetXMLDesc(gomock.Any()).Return(domainXML, nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"thawed"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSFreeze(gomock.Any(), gomock.Any()).Return(fmt.Errorf("freeze error"))
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().BackupBegin(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-				// FSThaw should NOT be called since freeze failed
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"thawed"}`, nil)
 				mockDomain.EXPECT().Free().Return(nil)
 
 				err := manager.BackupVirtualMachine(vmi, backupOptions)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Verify backup message was set
 				backupMetadata, exists := metadataCache.Backup.Load()
 				Expect(exists).To(BeTrue())
-				Expect(backupMetadata.BackupMsg).To(ContainSubstring("Failed freezing guest filesystem"))
+				Expect(backupMetadata.QuiesceStatus).To(Equal(string(backupv1.QuiesceFailed)))
 			})
 		})
 
@@ -302,40 +310,49 @@ var _ = Describe("Backup", func() {
 			It("should record thaw failure in metadata", func() {
 				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().GetXMLDesc(gomock.Any()).Return(domainXML, nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"thawed"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSFreeze(gomock.Any(), gomock.Any()).Return(nil)
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().BackupBegin(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"frozen"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSThaw(gomock.Any(), gomock.Any()).Return(fmt.Errorf("thaw error"))
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().Free().Return(nil)
 
 				err := manager.BackupVirtualMachine(vmi, backupOptions)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Verify thaw failure was recorded
 				backupMetadata, exists := metadataCache.Backup.Load()
 				Expect(exists).To(BeTrue())
-				Expect(backupMetadata.BackupMsg).To(Equal(unfreezeFailedMsg))
+				Expect(backupMetadata.QuiesceStatus).To(Equal(string(backupv1.QuiesceSucceeded)))
 			})
 		})
 
 		Context("when BackupBegin fails after freeze", func() {
 			It("should still thaw the filesystem", func() {
-				backupOptions.SkipQuiesce = false // Ensure quiesce is enabled
+				backupOptions.SkipQuiesce = false
 
 				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().GetXMLDesc(gomock.Any()).Return(domainXML, nil)
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"thawed"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSFreeze(gomock.Any(), gomock.Any()).Return(nil)
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().BackupBegin(gomock.Any(), gomock.Any(), gomock.Any()).Return(fmt.Errorf("backup begin failed"))
+				mockConn.EXPECT().QemuAgentCommand(gomock.Any(), gomock.Any()).Return(`{"return":"frozen"}`, nil)
+				mockConn.EXPECT().LookupDomainByName(gomock.Any()).Return(mockDomain, nil)
 				mockDomain.EXPECT().FSThaw(gomock.Any(), gomock.Any()).Return(nil)
+				mockDomain.EXPECT().Free().Return(nil)
 				mockDomain.EXPECT().Free().Return(nil)
 
 				err := manager.BackupVirtualMachine(vmi, backupOptions)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("backup begin failed"))
 
-				// Verify backup metadata was cleared due to failure
-				// The metadata cache stores an empty BackupMetadata on failure
 				backupMetadata, exists := metadataCache.Backup.Load()
-				Expect(exists).To(BeTrue()) // An empty backup metadata is stored
+				Expect(exists).To(BeTrue())
 				Expect(backupMetadata.Name).To(BeEmpty())
 			})
 		})
@@ -957,6 +974,37 @@ var _ = Describe("Backup", func() {
 			queryBitmaps = mockQueryBitmaps(map[string]string{
 				"/var/run/kubevirt-private/vmi-disks/disk1/disk.qcow2": "other-checkpoint",
 			})
+
+			result, disksWithoutBitmap, err := findDisksWithCheckpointBitmap(mockDomain, checkpointName)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Disks).To(BeEmpty())
+			Expect(disksWithoutBitmap).To(HaveLen(1))
+			Expect(disksWithoutBitmap[0]).To(Equal("vda"))
+		})
+
+		It("should treat inconsistent bitmap as absent", func() {
+			domainXML := `<domain>
+				<devices>
+					<disk type="file" device="disk">
+						<source file="/var/run/kubevirt-private/vmi-disks/disk1/disk.qcow2">
+							<dataStore>
+								<source file="/var/lib/kubevirt/disks/disk1-backing.qcow2"/>
+							</dataStore>
+						</source>
+						<target dev="vda"/>
+					</disk>
+				</devices>
+			</domain>`
+
+			mockDomain.EXPECT().GetXMLDesc(gomock.Any()).Return(domainXML, nil)
+			queryBitmaps = func(dom cli.VirDomain) (map[string][]qmpBitmapInfo, error) {
+				return map[string][]qmpBitmapInfo{
+					"/var/run/kubevirt-private/vmi-disks/disk1/disk.qcow2": {
+						{Name: checkpointName, Inconsistent: true},
+					},
+				}, nil
+			}
 
 			result, disksWithoutBitmap, err := findDisksWithCheckpointBitmap(mockDomain, checkpointName)
 

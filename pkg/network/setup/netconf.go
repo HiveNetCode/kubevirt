@@ -37,6 +37,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/util"
 	converternet "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/network"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 type cacheCreator interface {
@@ -45,6 +46,7 @@ type cacheCreator interface {
 
 type clusterConfigurer interface {
 	GetNetworkBindings() map[string]v1.InterfaceBindingPlugin
+	PortRangesSpecGateEnabled() bool
 }
 
 type NetConf struct {
@@ -94,7 +96,7 @@ func (c *NetConf) Setup(vmi *v1.VirtualMachineInstance, networks []v1.Network, l
 	}
 
 	ownerID, _ := strconv.Atoi(netdriver.LibvirtUserAndGroupId)
-	if util.IsNonRootVMI(vmi) {
+	if vmitrait.IsNonRoot(vmi) {
 		ownerID = util.NonRootUID
 	}
 	queuesCapacity := int(converternet.NetworkQueuesCapacity(vmi))
@@ -106,7 +108,7 @@ func (c *NetConf) Setup(vmi *v1.VirtualMachineInstance, networks []v1.Network, l
 		ownerID,
 		queuesCapacity,
 		state,
-		netpod.WithMasqueradeAdapter(newMasqueradeAdapter(vmi)),
+		netpod.WithMasqueradeAdapter(newMasqueradeAdapter(vmi, c.clusterConfigurer.PortRangesSpecGateEnabled())),
 		netpod.WithCacheCreator(c.cacheCreator),
 		netpod.WithBindingPlugins(c.clusterConfigurer.GetNetworkBindings()),
 		netpod.WithLogger(log.Log.Object(vmi)),
@@ -131,12 +133,16 @@ func (c *NetConf) Teardown(vmi *v1.VirtualMachineInstance) error {
 	return nil
 }
 
-func newMasqueradeAdapter(vmi *v1.VirtualMachineInstance) masquerade.MasqPod {
+func newMasqueradeAdapter(vmi *v1.VirtualMachineInstance, portRangesSpecGateEnabled bool) masquerade.MasqPod {
 	if vmi.Status.MigrationTransport == v1.MigrationTransportUnix {
-		return masquerade.New(masquerade.WithIstio(istio.ProxyInjectionEnabled(vmi)))
+		return masquerade.New(
+			masquerade.WithIstio(istio.ProxyInjectionEnabled(vmi)),
+			masquerade.WithPortRangesSpecGateEnabled(portRangesSpecGateEnabled),
+		)
 	} else {
 		return masquerade.New(
 			masquerade.WithIstio(istio.ProxyInjectionEnabled(vmi)),
+			masquerade.WithPortRangesSpecGateEnabled(portRangesSpecGateEnabled),
 			masquerade.WithLegacyMigrationPorts(),
 		)
 	}

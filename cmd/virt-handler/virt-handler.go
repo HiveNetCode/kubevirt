@@ -67,6 +67,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/controller"
 	clientmetrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler"
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler/collector"
 	metricshandler "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler/handler"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 	"kubevirt.io/kubevirt/pkg/network/passt"
@@ -83,6 +84,7 @@ import (
 	launcherclients "kubevirt.io/kubevirt/pkg/virt-handler/launcher-clients"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	nodelabeller "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller"
+	virthandlerplugins "kubevirt.io/kubevirt/pkg/virt-handler/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-handler/rest"
 	"kubevirt.io/kubevirt/pkg/virt-handler/seccomp"
 	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
@@ -108,6 +110,9 @@ const (
 	maxRequestsInFlight = 3
 	// Default port that virt-handler listens to console requests
 	defaultConsoleServerPort = 8186
+
+	// Default port that virt-handler listens for vmstats requests
+	defaultVMStatsServerPort = 8187
 
 	// Default period for resyncing virt-launcher domain cache
 	defaultDomainResyncPeriodSeconds = 300
@@ -166,7 +171,9 @@ type virtHandlerApp struct {
 	serverTLSConfig             *tls.Config
 	migrationOldClientTLSConfig *tls.Config
 	migrationClientTLSConfig    *tls.Config
+	vmStatsTLSConfig            *tls.Config
 	consoleServerPort           int
+	vmStatsServerPort           int
 	clientcertmanager           certificate.Manager
 	vsockClientCertManager      certificate.Manager
 	servercertmanager           certificate.Manager
@@ -255,12 +262,13 @@ func (app *virtHandlerApp) Run() {
 	recorder := broadcaster.NewRecorder(scheme.Scheme, k8sv1.EventSource{Component: "virt-handler", Host: app.HostOverride})
 
 	// Wire VirtualMachineInstance controller
-	factory := controller.NewKubeInformerFactory(app.virtCli.RestClient(), app.virtCli, nil, app.namespace)
+	factory := controller.NewKubeInformerFactory(app.virtCli.RestClient(), app.virtCli, app.virtCli, nil, app.namespace)
 
 	vmiInformer := factory.VMI()
 	vmiSourceInformer := factory.VMISourceHost(app.HostOverride)
 	vmiTargetInformer := factory.VMITargetHost(app.HostOverride)
 	backupTrackerInformer := factory.VirtualMachineBackupTracker()
+	pluginInformer := factory.Plugin()
 
 	// Wire Domain controller
 	domainSharedInformer := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmiInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
@@ -388,7 +396,13 @@ func (app *virtHandlerApp) Run() {
 		factory.KubeVirt().HasSynced,
 		nodeInformer.HasSynced,
 		backupTrackerInformer.HasSynced,
+		pluginInformer.HasSynced,
 	)
+
+	nodeHookManager, err := virthandlerplugins.NewNodeHookManager(pluginInformer.GetStore(), app.clusterConfig)
+	if err != nil {
+		panic(err)
+	}
 
 	migrationSourceController, err := virthandler.NewMigrationSourceController(
 		recorder,
@@ -403,6 +417,8 @@ func (app *virtHandlerApp) Run() {
 		"/proc/%d/root/var/run",
 		netStat,
 		passtRepairHandler,
+		pluginInformer.GetStore(),
+		nodeHookManager,
 	)
 	if err != nil {
 		panic(err)
@@ -427,6 +443,8 @@ func (app *virtHandlerApp) Run() {
 		netStat,
 		netresources.MemoryCalculator{},
 		passtRepairHandler,
+		pluginInformer.GetStore(),
+		nodeHookManager,
 	)
 	if err != nil {
 		panic(err)
@@ -455,13 +473,33 @@ func (app *virtHandlerApp) Run() {
 		netConf,
 		netStat,
 		cbtHandler,
+		pluginInformer.GetStore(),
+		nodeHookManager,
 	)
 	if err != nil {
 		panic(err)
 	}
 
+	pluginInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(_ interface{}) { vmController.InvalidatePluginsCache() },
+		UpdateFunc: func(_, _ interface{}) { vmController.InvalidatePluginsCache() },
+		DeleteFunc: func(_ interface{}) { vmController.InvalidatePluginsCache() },
+	})
+	pluginInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(_ interface{}) { migrationTargetController.InvalidatePluginsCache() },
+		UpdateFunc: func(_, _ interface{}) { migrationTargetController.InvalidatePluginsCache() },
+		DeleteFunc: func(_ interface{}) { migrationTargetController.InvalidatePluginsCache() },
+	})
+
 	promErrCh := make(chan error)
 	go app.runPrometheusServer(promErrCh)
+
+	vmStatsHandler := rest.NewVMStatsHandler(
+		vmiSourceInformer.GetStore(),
+		app.clusterConfig,
+		collector.NewConcurrentCollector(app.MaxRequestsInFlight),
+	)
+	go app.runVMStatsServer(vmStatsHandler)
 
 	lifecycleHandler := rest.NewLifecycleHandler(
 		recorder,
@@ -623,6 +661,27 @@ func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
 	errCh <- server.ListenAndServeTLS("", "")
 }
 
+func (app *virtHandlerApp) runVMStatsServer(vmStatsHandler *rest.VMStatsHandler) {
+	mux := restful.NewContainer()
+	webService := new(restful.WebService)
+	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	webService.Route(webService.GET("/v1/vmstats").
+		To(vmStatsHandler.GetVMStats).
+		Produces(restful.MIME_JSON).
+		Consumes(restful.MIME_JSON).
+		Returns(http.StatusOK, "OK", map[string]*rest.VMStatsResult{}))
+	mux.Add(webService)
+	server := http.Server{
+		Addr:      fmt.Sprintf("%s:%d", app.ServiceListen.BindAddress, app.vmStatsServerPort),
+		Handler:   mux,
+		TLSConfig: app.vmStatsTLSConfig,
+		// Disable HTTP/2
+		// See CVE-2023-44487
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
+	}
+	server.ListenAndServeTLS("", "")
+}
+
 func (app *virtHandlerApp) runServer(errCh chan error, consoleHandler *rest.ConsoleHandler, lifecycleHandler *rest.LifecycleHandler) {
 	ws := new(restful.WebService)
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/console").To(consoleHandler.SerialHandler))
@@ -722,6 +781,9 @@ func (app *virtHandlerApp) AddFlags() {
 	flag.IntVar(&app.consoleServerPort, "console-server-port", defaultConsoleServerPort,
 		"The port virt-handler listens on for console requests")
 
+	flag.IntVar(&app.vmStatsServerPort, "vmstats-server-port", defaultVMStatsServerPort,
+		"The port virt-handler listens on for vmstats requests")
+
 	flag.IntVar(&app.domainResyncPeriodSeconds, "domain-resync-period-seconds", defaultDomainResyncPeriodSeconds,
 		"Recurring period for resyncing all known virt-launcher domains.")
 
@@ -737,6 +799,7 @@ func (app *virtHandlerApp) AddFlags() {
 
 	flag.StringVar(&app.vsockClientKeyFilePath, "vsock-client-key-file", defaultVsockClientKeyFilePath,
 		"Private key for the client certificate used to prove the identity of the virt-handler to in-guest vsock agent")
+
 }
 
 func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) error {
@@ -752,6 +815,7 @@ func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) erro
 	app.migrationServerTLSConfig = kvtls.SetupTLSForVirtHandlerServer(app.caManager, app.servercertmanager, app.externallyManaged, app.clusterConfig, app.migrationCNTypes)
 	app.migrationOldClientTLSConfig = kvtls.SetupTLSForVirtHandlerClients(app.caManager, app.clientcertmanager, app.externallyManaged)
 	app.migrationClientTLSConfig = kvtls.SetupTLSForVirtHandlerClients(app.caManager, app.migrationCertManager, app.externallyManaged)
+	app.vmStatsTLSConfig = kvtls.SetupTLSForVirtHandlerServer(app.caManager, app.servercertmanager, app.externallyManaged, app.clusterConfig, []string{"monitoring"})
 
 	return nil
 }

@@ -129,7 +129,7 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 	Context("With simple VM", func() {
 		BeforeEach(func() {
 			var err error
-			vm = libvmi.NewVirtualMachine(libvmifact.NewCirros())
+			vm = libvmi.NewVirtualMachine(libvmifact.NewAlpineWithTestTooling())
 			vm, err = virtClient.VirtualMachine(testsuite.GetTestNamespace(nil)).Create(context.Background(), vm, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 		})
@@ -1261,7 +1261,7 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 			It("[test_id:9705]Should show included and excluded volumes in the snapshot", func() {
 				noSnapshotSC := libstorage.GetNoVolumeSnapshotStorageClass("local")
 				if noSnapshotSC == "" {
-					Skip("Skipping test, no storage class without snapshot support")
+					Skip("Skipping test, no storage class without snapshot support") //nolint:forbidigo
 				}
 				By("Creating DV with snapshot supported storage class")
 				includedDataVolume := libdv.NewDataVolume(
@@ -1317,6 +1317,12 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 				Expect(snapshot.Status.SnapshotVolumes.IncludedVolumes[0]).Should(Equal("snapshotablevolume"))
 				Expect(snapshot.Status.SnapshotVolumes.ExcludedVolumes).Should(HaveLen(1))
 				Expect(snapshot.Status.SnapshotVolumes.ExcludedVolumes[0]).Should(Equal("notsnapshotablevolume"))
+
+				By("Verifying PartialSnapshot indication is set when snapshottable volume is excluded")
+				Expect(snapshot.Status.Indications).Should(ContainElement(snapshotv1.VMSnapshotPartialSnapshotIndication))
+				Expect(snapshot.Status.SourceIndications).Should(ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"Indication": Equal(snapshotv1.VMSnapshotPartialSnapshotIndication),
+				})))
 			})
 
 			It("Should also include backend PVC in the snapshot", func() {

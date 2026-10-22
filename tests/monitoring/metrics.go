@@ -58,7 +58,7 @@ var _ = Describe("[sig-monitoring]Metrics", decorators.SigMonitoring, func() {
 	})
 
 	Context("Prometheus metrics", Ordered, func() {
-		var excludedMetrics = map[string]bool{
+		excludedMetrics := map[string]bool{
 			// virt-api
 			// can later be added in pre-existing feature tests
 			"kubevirt_portforward_active_tunnels":                true,
@@ -97,14 +97,17 @@ var _ = Describe("[sig-monitoring]Metrics", decorators.SigMonitoring, func() {
 			// Verify separately after deletion
 			"kubevirt_vmi_phase_transition_time_from_deletion_seconds": true,
 
-			// This metric is being tested in storage hotplug
-			"kubevirt_vmi_contains_ephemeral_hotplug_volume": true,
+			// Needs a guest crash - tested in VM Monitoring, guest panic metrics
+			"kubevirt_vmi_guest_os_panic_total": true,
 
 			// CPU load metrics need an updated libvirt version running on the nodes
 			// that exposes the CPU load information
 			"kubevirt_vmi_guest_load_1m":  true,
 			"kubevirt_vmi_guest_load_5m":  true,
 			"kubevirt_vmi_guest_load_15m": true,
+
+			// needs GPU - tested in MediatedDevices
+			"kubevirt_vmi_gpu_info": true,
 		}
 
 		BeforeAll(func() {
@@ -194,12 +197,24 @@ var _ = Describe("[sig-monitoring]Metrics", decorators.SigMonitoring, func() {
 					Namespace: vm.Namespace,
 				},
 			}
-			Expect(libwait.WaitForVirtualMachineToDisappearWithTimeout(vmiRef, 240*time.Second)).To(Succeed())
+			const vmiDisappearTimeout = 240
+			Expect(libwait.WaitForVirtualMachineToDisappearWithTimeout(
+				vmiRef, time.Duration(vmiDisappearTimeout)*time.Second,
+			)).To(Succeed())
 
 			By("Waiting until the phase transition from deletion metric is reported")
 			Eventually(func() []testing.PromResult {
 				return fetchPrometheusKubevirtMetrics(virtClient).Data.Result
 			}, 3*time.Minute, 10*time.Second).Should(ContainElement(gomegaContainsMetricMatcher(metric, nil)))
+
+			By("Waiting until vmi sync metrics are removed")
+			Eventually(func() error {
+				_, err := libmonitoring.GetMetricValueWithLabels(virtClient, "kubevirt_vmi_sync_total", map[string]string{
+					"namespace": vmiRef.Namespace,
+					"name":      vmiRef.Name,
+				})
+				return err
+			}, 3*time.Minute, 10*time.Second).Should(HaveOccurred())
 		})
 	})
 
@@ -247,7 +262,6 @@ var _ = Describe("[sig-monitoring]Metrics", decorators.SigMonitoring, func() {
 	})
 
 	Context("Configuration metrics", Serial, func() {
-
 		It("kubevirt_configuration_emulation_enabled is 1 when useEmulation=true", func() {
 			updateUseEmulationAndWaitForMetric(virtClient, true)
 		})
@@ -263,7 +277,8 @@ func fetchPrometheusKubevirtMetrics(virtClient kubecli.KubevirtClient) *libmonit
 }
 
 func fetchPrometheusMetrics(virtClient kubecli.KubevirtClient, query string) *libmonitoring.QueryRequestResult {
-	metrics, err := libmonitoring.QueryRange(virtClient, query, time.Now().Add(-1*time.Minute), time.Now(), 15*time.Second)
+	const queryStep = 15 * time.Second
+	metrics, err := libmonitoring.QueryRange(virtClient, query, time.Now().Add(-1*time.Minute), time.Now(), queryStep)
 	Expect(err).ToNot(HaveOccurred())
 
 	Expect(metrics.Status).To(Equal("success"))
@@ -279,7 +294,7 @@ func setupSharedVM(virtClient kubecli.KubevirtClient) *v1.VirtualMachine {
 
 	vmi := libvmifact.NewFedora(
 		libvmi.WithNamespace(testsuite.GetTestNamespace(nil)),
-		libvmi.WithMemoryLimit("512Mi"),
+		libvmi.WithMemoryLimit(libvmifact.FedoraMemory),
 		libvmi.WithDataVolume("testdisk", dv.Name),
 		libvmi.WithInterface(iface),
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
@@ -299,7 +314,10 @@ func setupSharedVM(virtClient kubecli.KubevirtClient) *v1.VirtualMachine {
 	libmonitoring.WaitForMetricValueWithLabels(virtClient, "kubevirt_vmi_info", 1, labels, 1)
 
 	By("Waiting for the VM domainstats metrics to be reported")
-	libmonitoring.WaitForMetricValueWithLabelsToBe(virtClient, "kubevirt_vmi_filesystem_capacity_bytes", map[string]string{"namespace": vm.Namespace, "name": vm.Name}, 0, ">", 0)
+	fsLabels := map[string]string{"namespace": vm.Namespace, "name": vm.Name}
+	libmonitoring.WaitForMetricValueWithLabelsToBe(
+		virtClient, "kubevirt_vmi_filesystem_capacity_bytes", fsLabels, 0, ">", 0,
+	)
 
 	return vm
 }

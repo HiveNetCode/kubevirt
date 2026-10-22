@@ -26,6 +26,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type Connection interface {
 	DomainEventLifecycleRegister(callback libvirt.DomainEventLifecycleCallback) error
 	DomainEventDeviceAddedRegister(callback libvirt.DomainEventDeviceAddedCallback) error
 	DomainEventDeviceRemovedRegister(callback libvirt.DomainEventDeviceRemovedCallback) error
+	DomainEventMigrationIterationRegister(callback libvirt.DomainEventMigrationIterationCallback) (int, error)
 	AgentEventLifecycleRegister(callback libvirt.DomainEventAgentLifecycleCallback) error
 	VolatileDomainEventDeviceRemovedRegister(domain VirDomain, callback libvirt.DomainEventDeviceRemovedCallback) (int, error)
 	DomainEventMemoryDeviceSizeChangeRegister(callback libvirt.DomainEventMemoryDeviceSizeChangeCallback) error
@@ -94,7 +96,6 @@ type LibvirtConnection struct {
 	domainEventJobCompletedCallbacks            []libvirt.DomainEventJobCompletedCallback
 	domainDeviceAddedEventCallbacks             []libvirt.DomainEventDeviceAddedCallback
 	domainDeviceRemovedEventCallbacks           []libvirt.DomainEventDeviceRemovedCallback
-	domainEventMigrationIterationCallbacks      []libvirt.DomainEventMigrationIterationCallback
 	agentEventCallbacks                         []libvirt.DomainEventAgentLifecycleCallback
 	domainDeviceMemoryDeviceSizeChangeCallbacks []libvirt.DomainEventMemoryDeviceSizeChangeCallback
 }
@@ -192,6 +193,16 @@ func (l *LibvirtConnection) DomainEventDeviceRemovedRegister(callback libvirt.Do
 	_, err = l.VolatileDomainEventDeviceRemovedRegister(nil, callback)
 	l.checkConnectionLost(err)
 	return
+}
+
+func (l *LibvirtConnection) DomainEventMigrationIterationRegister(callback libvirt.DomainEventMigrationIterationCallback) (int, error) {
+	if err := l.reconnectIfNecessary(); err != nil {
+		return 0, err
+	}
+
+	registrationID, err := l.Connect.DomainEventMigrationIterationRegister(nil, callback)
+	l.checkConnectionLost(err)
+	return registrationID, err
 }
 
 func (l *LibvirtConnection) AgentEventLifecycleRegister(callback libvirt.DomainEventAgentLifecycleCallback) (err error) {
@@ -341,20 +352,10 @@ func (l *LibvirtConnection) GetDomainStats(statsTypes libvirt.DomainStatsTypes, 
 			return list, err
 		}
 
-		devAliasMap, err := l.GetDeviceAliasMap(domStat.Domain)
-		if err != nil {
-			return list, err
-		}
-
-		domInfo, err := domStat.Domain.GetInfo()
-		if err != nil {
-			return list, err
-		}
-
 		dirtyRateInfo := domStat.DirtyRate
 
 		stat := &stats.DomainStats{}
-		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, domInfo, devAliasMap, migrateJobInfo, dirtyRateInfo, stat)
+		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, migrateJobInfo, dirtyRateInfo, stat)
 		if err != nil {
 			return list, err
 		}
@@ -561,12 +562,6 @@ func (l *LibvirtConnection) reconnectIfNecessary() (err error) {
 			return err
 		}
 	}
-	for _, callback := range l.domainEventMigrationIterationCallbacks {
-		log.Log.Infof("Re-registered iteration callback: %p", callback)
-		if _, err = l.Connect.DomainEventMigrationIterationRegister(nil, callback); err != nil {
-			return err
-		}
-	}
 	for _, callback := range l.agentEventCallbacks {
 		log.Log.Infof("Re-registered agent callback: %p", callback)
 		if _, err = l.Connect.DomainEventAgentLifecycleRegister(nil, callback); err != nil {
@@ -596,8 +591,8 @@ func (l *LibvirtConnection) reconnectIfNecessary() (err error) {
 
 	if l.reconnect != nil {
 		// Notify the callback about the reconnect through channel.
-		// This way we give the callback a chance to emit an error to the watcher
-		// ListWatcher will re-register automatically afterwards
+		// The callback triggers an immediate domain state reconciliation
+		// via eventCallback, sending a watch.Modified event to virt-handler.
 		l.reconnect <- true
 	}
 	return nil
@@ -650,6 +645,7 @@ type VirDomain interface {
 	GetXMLDesc(flags libvirt.DomainXMLFlags) (string, error)
 	MigrateToURI3(string, *libvirt.DomainMigrateParameters, libvirt.DomainMigrateFlags) error
 	MigrateStartPostCopy(flags uint32) error
+	MigrateSetMaxDowntime(downtime uint64, flags uint32) error
 	MemoryStats(nrStats uint32, flags uint32) ([]libvirt.DomainMemoryStat, error)
 	GetJobStats(flags libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error)
 	GetJobInfo() (*libvirt.DomainJobInfo, error)
@@ -666,6 +662,7 @@ type VirDomain interface {
 	SetVcpusFlags(vcpu uint, flags libvirt.DomainVcpuFlags) error
 	GetLaunchSecurityInfo(flags uint32) (*libvirt.DomainLaunchSecurityParameters, error)
 	SetLaunchSecurityState(params *libvirt.DomainLaunchSecurityStateParameters, flags uint32) error
+	FDAssociate(name string, files []os.File, flags libvirt.DomainFDAssociateFlags) error
 	FSFreeze(mounts []string, flags uint32) error
 	FSThaw(mounts []string, flags uint32) error
 	Screenshot(stream *libvirt.Stream, screen, flags uint32) (string, error)

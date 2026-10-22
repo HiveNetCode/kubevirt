@@ -50,10 +50,12 @@ import (
 	"kubevirt.io/kubevirt/pkg/libdv"
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
 	"kubevirt.io/kubevirt/tests/libkubevirt"
@@ -108,7 +110,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			sc, foundSC := libstorage.GetAvailableRWFileSystemStorageClass()
 			Expect(foundSC).To(BeTrue(), "Filesystem storage is not present")
 
-			return newVirtualMachineInstanceWithDV(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpine), sc)
+			return newVirtualMachineInstanceWithDV(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpineTestTooling), sc)
 		}
 
 		validateGenerationState := func(vm *v1.VirtualMachine, expectedGeneration int, expectedDesiredGeneration int, expectedObservedGeneration int, expectedGenerationAnnotation int) {
@@ -136,7 +138,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			const oldCpu = "222"
 			const oldMemory = "2222222"
 
-			vm := libvmi.NewVirtualMachine(libvmifact.NewAlpine())
+			vm := libvmi.NewVirtualMachine(libvmifact.NewGuestless())
 			vm.Namespace = testsuite.GetTestNamespace(vm)
 			vm.APIVersion = "kubevirt.io/" + v1.ApiStorageVersion
 			vm.Spec.Template.Spec.Domain.Resources.Limits = make(k8sv1.ResourceList)
@@ -186,8 +188,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			))
 		})
 
-		It("should sync the generation annotation on the vmi during restarts", decorators.Conformance, func() {
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+		It("should sync the generation annotation on the vmi during restarts", decorators.Conformance, decorators.WgS390x, func() {
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			for i := 1; i <= 3; i++ {
 				// Generation increases twice for each pass, since there is a stop and a
@@ -201,8 +203,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			}
 		})
 
-		It("should not update the vmi generation annotation when the template changes", decorators.Conformance, func() {
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+		It("should not update the vmi generation annotation when the template changes", decorators.Conformance, decorators.WgS390x, func() {
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			By("Updating the VM template metadata")
 			labelsPatch, err := patch.New(
@@ -235,7 +237,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			validateGenerationState(vm, 6, 6, 6, 6)
 		})
 
-		DescribeTable("[test_id:1521]should remove VirtualMachineInstance once the VM is marked for deletion", decorators.Conformance, func(createTemplate vmiBuilder, ensureGracefulTermination bool) {
+		DescribeTable("[test_id:1521]should remove VirtualMachineInstance once the VM is marked for deletion", decorators.Conformance, decorators.WgS390x, func(createTemplate vmiBuilder, ensureGracefulTermination bool) {
 			template, _ := createTemplate()
 			vm := libvmops.StartVirtualMachine(createVM(virtClient, template))
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
@@ -257,8 +259,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Entry("[storage-req]with Filesystem Disk", decorators.StorageReq, newVirtualMachineInstanceWithFileDisk, true),
 		)
 
-		It("[test_id:1522]should remove owner references on the VirtualMachineInstance if it is orphan deleted", decorators.Conformance, func() {
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+		It("[test_id:1522]should remove owner references on the VirtualMachineInstance if it is orphan deleted", decorators.Conformance, decorators.WgS390x, func() {
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			By("Getting owner references")
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
@@ -278,8 +280,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(vmi.OwnerReferences).To(BeEmpty())
 		})
 
-		It("[test_id:1523]should recreate VirtualMachineInstance if it gets deleted", decorators.Conformance, func() {
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+		It("[test_id:1523]should recreate VirtualMachineInstance if it gets deleted", decorators.Conformance, decorators.WgS390x, func() {
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
@@ -289,9 +291,9 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Eventually(ThisVMI(vmi), 240*time.Second, 1*time.Second).Should(BeRestarted(vmi.UID))
 		})
 
-		It("[test_id:1524]should recreate VirtualMachineInstance if the VirtualMachineInstance's pod gets deleted", decorators.Conformance, func() {
+		It("[test_id:1524]should recreate VirtualMachineInstance if the VirtualMachineInstance's pod gets deleted", decorators.Conformance, decorators.WgS390x, func() {
 			By("Start a new VM")
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 			firstVMI, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
@@ -318,7 +320,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(vmiPod.Name).ToNot(Equal(firstPod.Name))
 		})
 
-		DescribeTable("[test_id:1525]should stop VirtualMachineInstance if running set to false", func(createTemplate vmiBuilder) {
+		DescribeTable("[test_id:1525]should stop VirtualMachineInstance if running set to false", decorators.WgS390x, func(createTemplate vmiBuilder) {
 			template, _ := createTemplate()
 			libvmops.StopVirtualMachine(libvmops.StartVirtualMachine(createVM(virtClient, template)))
 		},
@@ -326,8 +328,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Entry("[storage-req]with Filesystem Disk", decorators.StorageReq, newVirtualMachineInstanceWithFileDisk),
 		)
 
-		It("[test_id:1526]should start and stop VirtualMachineInstance multiple times", decorators.Conformance, func() {
-			vm := createVM(virtClient, libvmifact.NewAlpine())
+		It("[test_id:1526]should start and stop VirtualMachineInstance multiple times", decorators.Conformance, decorators.WgS390x, func() {
+			vm := createVM(virtClient, libvmifact.NewGuestless())
 			// Start and stop VirtualMachineInstance multiple times
 			for i := 0; i < 5; i++ {
 				By(fmt.Sprintf("Doing run: %d", i))
@@ -335,8 +337,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			}
 		})
 
-		It("[test_id:1527]should not update the VirtualMachineInstance spec if Running", decorators.Conformance, func() {
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+		It("[test_id:1527]should not update the VirtualMachineInstance spec if Running", decorators.Conformance, decorators.WgS390x, func() {
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			By("Updating the VM template spec")
 			updatedVM := vm.DeepCopy()
@@ -374,7 +376,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(vmiMemory.Cmp(*vmMemory)).To(Equal(0))
 		})
 
-		It("[test_id:1528]should survive guest shutdown, multiple times", decorators.Conformance, func() {
+		It("[test_id:1528]should survive guest shutdown, multiple times", decorators.Conformance, decorators.WgS390x, func() {
 			vm := createRunningVM(virtClient, libvmifact.NewAlpine())
 			Eventually(ThisVM(vm)).WithTimeout(300 * time.Second).WithPolling(time.Second).Should(BeReady())
 
@@ -394,9 +396,9 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			}
 		})
 
-		It("should always have updated vm revision when starting vm", decorators.Conformance, func() {
+		It("should always have updated vm revision when starting vm", decorators.Conformance, decorators.WgS390x, func() {
 			By("Starting the VM")
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
@@ -454,8 +456,8 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(vmRevision.Spec).To(Equal(vm.Spec))
 		})
 
-		It("[test_id:4645]should set the Ready condition on VM", decorators.Conformance, func() {
-			vm := createVM(virtClient, libvmifact.NewAlpine())
+		It("[test_id:4645]should set the Ready condition on VM", decorators.Conformance, decorators.WgS390x, func() {
+			vm := createVM(virtClient, libvmifact.NewGuestless())
 
 			Eventually(ThisVM(vm), 300*time.Second, 1*time.Second).Should(HaveConditionFalse(v1.VirtualMachineReady))
 
@@ -468,7 +470,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Eventually(ThisVM(vm), 300*time.Second, 1*time.Second).Should(HaveConditionFalse(v1.VirtualMachineReady))
 		})
 
-		DescribeTable("should report an error status", decorators.Conformance, func(vmi *v1.VirtualMachineInstance, expectedStatus v1.VirtualMachinePrintableStatus) {
+		DescribeTable("should report an error status", decorators.Conformance, decorators.WgS390x, func(vmi *v1.VirtualMachineInstance, expectedStatus v1.VirtualMachinePrintableStatus) {
 			vm := createRunningVM(virtClient, vmi)
 			Eventually(ThisVM(vm), 300*time.Second, 1*time.Second).Should(HavePrintableStatus(expectedStatus))
 		},
@@ -505,7 +507,12 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			),
 		)
 
-		It("[test_id:6869]should report an error status when image pull error occurs", decorators.Conformance, func() {
+		It("[test_id:6869]should report an error status when image pull error occurs", Serial, decorators.Conformance, decorators.WgS390x, func() {
+			if checks.HasFeature(featuregate.ImageVolume) {
+				config.DisableFeatureGate(featuregate.ImageVolume)
+				DeferCleanup(config.EnableFeatureGate, featuregate.ImageVolume)
+			}
+
 			vmi := libvmi.New(
 				libvmi.WithContainerDisk("disk0", "no-such-image"),
 				libvmi.WithMemoryRequest("128Mi"),
@@ -526,7 +533,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			waitForVMStateTransition(vm, expectedStates, 660*time.Second)
 		})
 
-		It("[test_id:7679]should report an error status when data volume error occurs", func() {
+		It("[test_id:7679]should report an error status when data volume error occurs", decorators.WgS390x, func() {
 			By("Verifying that required StorageClass is configured")
 			storageClassName := libstorage.Config.StorageRWOFileSystem
 
@@ -547,7 +554,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Eventually(ThisVM(vm), 300*time.Second, 1*time.Second).Should(HavePrintableStatus(v1.VirtualMachineStatusDataVolumeError))
 		})
 
-		DescribeTable("should not remove a succeeded VMI", func(runStrategy v1.VirtualMachineRunStrategy, verifyFn func(*v1.VirtualMachine)) {
+		DescribeTable("should not remove a succeeded VMI", decorators.WgS390x, func(runStrategy v1.VirtualMachineRunStrategy, verifyFn func(*v1.VirtualMachine)) {
 			By("creating a VM")
 			vm := libvmi.NewVirtualMachine(libvmifact.NewAlpine(), libvmi.WithRunStrategy(runStrategy))
 			vm, err := virtClient.VirtualMachine(testsuite.GetTestNamespace(vm)).Create(context.Background(), vm, metav1.CreateOptions{})
@@ -601,7 +608,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			}),
 		)
 
-		Context("Using RunStrategyAlways", func() {
+		Context("Using RunStrategyAlways", decorators.WgS390x, func() {
 			It("[test_id:3165]should restart a succeeded VMI", func() {
 				By("Creating a VM with RunStategyRunning")
 				vm := libvmi.NewVirtualMachine(libvmifact.NewAlpine(), libvmi.WithRunStrategy(v1.RunStrategyAlways))
@@ -625,7 +632,46 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		})
 
 		Context("Using RunStrategyRerunOnFailure", func() {
-			It("[test_id:2188] should remove a succeeded VMI", func() {
+			It("should remain Stopped after PVC is deleted and recreated", func() {
+				sc, exists := libstorage.GetRWOFileSystemStorageClass()
+				Expect(exists).To(BeTrue())
+				ns := testsuite.GetTestNamespace(nil)
+				pvcName := "rerun-pvc-test"
+
+				By("Creating a PVC")
+				pvc := libstorage.NewPVC(pvcName, "1Gi", sc)
+				_, err := virtClient.CoreV1().PersistentVolumeClaims(ns).Create(context.Background(), pvc, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Creating a VM with RunStrategyRerunOnFailure and the PVC")
+				vm := libvmi.NewVirtualMachine(
+					libvmifact.NewGuestless(libvmi.WithPersistentVolumeClaim("testdisk", pvcName)),
+					libvmi.WithRunStrategy(v1.RunStrategyRerunOnFailure),
+				)
+				vm, err = virtClient.VirtualMachine(ns).Create(context.Background(), vm, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Waiting for VM to be running")
+				Eventually(ThisVM(vm), 360*time.Second, 1*time.Second).Should(HavePrintableStatus(v1.VirtualMachineStatusRunning))
+
+				By("Stopping the VM")
+				vm = libvmops.StopVirtualMachine(vm)
+				Eventually(ThisVM(vm), 60*time.Second, 1*time.Second).Should(HavePrintableStatus(v1.VirtualMachineStatusStopped))
+
+				By("Deleting the PVC")
+				err = virtClient.CoreV1().PersistentVolumeClaims(ns).Delete(context.Background(), pvcName, metav1.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Eventually(ThisPVCWith(ns, pvcName), 60*time.Second, 1*time.Second).Should(BeGone())
+
+				By("Recreating the PVC")
+				_, err = virtClient.CoreV1().PersistentVolumeClaims(ns).Create(context.Background(), libstorage.NewPVC(pvcName, "1Gi", sc), metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Verifying the VM remains Stopped")
+				Consistently(ThisVM(vm), 30*time.Second, 5*time.Second).Should(HavePrintableStatus(v1.VirtualMachineStatusStopped))
+			})
+
+			It("[test_id:2188] should remove a succeeded VMI", decorators.WgS390x, func() {
 				By("Creating a VM with RunStrategyRerunOnFailure")
 				vm := libvmi.NewVirtualMachine(libvmifact.NewAlpine(), libvmi.WithRunStrategy(v1.RunStrategyRerunOnFailure))
 				vm, err := virtClient.VirtualMachine(testsuite.GetTestNamespace(vm)).Create(context.Background(), vm, metav1.CreateOptions{})
@@ -797,10 +843,10 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		Entry("with v1alpha3 api", "kubevirt.io/v1alpha3"),
 	)
 
-	Context("crash loop backoff", decorators.Conformance, func() {
+	Context("crash loop backoff", decorators.Conformance, decorators.WgS390x, func() {
 		It("should backoff attempting to create a new VMI when 'runStrategy: Always' during crash loop.", func() {
 			By("Creating VirtualMachine")
-			vm := createRunningVM(virtClient, libvmifact.NewAlpine(
+			vm := createRunningVM(virtClient, libvmifact.NewGuestless(
 				libvmi.WithAnnotation(v1.FuncTestLauncherFailFastAnnotation, ""),
 			))
 
@@ -843,7 +889,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		})
 	})
 
-	Context("VirtualMachineControllerFinalizer", decorators.Conformance, func() {
+	Context("VirtualMachineControllerFinalizer", decorators.Conformance, decorators.WgS390x, func() {
 		const customFinalizer = "customFinalizer"
 
 		var (
@@ -974,7 +1020,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		})
 	})
 
-	Context(" when node becomes unhealthy", Serial, func() {
+	Context(" when node becomes unhealthy", decorators.WgS390x, Serial, func() {
 		const componentName = "virt-handler"
 		var nodeName string
 
@@ -990,7 +1036,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 
 		It(" the VMs running in that node should be respawned", func() {
 			By("Starting VM")
-			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewAlpine()))
+			vm := libvmops.StartVirtualMachine(createVM(virtClient, libvmifact.NewGuestless()))
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 

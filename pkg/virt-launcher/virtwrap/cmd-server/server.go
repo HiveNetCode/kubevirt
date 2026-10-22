@@ -28,18 +28,23 @@ import (
 
 	"google.golang.org/grpc"
 
+	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
 	"kubevirt.io/client-go/log"
 
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
+	notifyclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent"
 	launcherErrors "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 )
 
@@ -48,16 +53,60 @@ const (
 )
 
 type ServerOptions struct {
-	allowEmulation bool
+	allowEmulation          bool
+	vmStatsCollectorEnabled bool
+	notifier                *notifyclient.Notifier
+	vmiName                 string
+	vmiNamespace            string
+	vmiUID                  types.UID
 }
 
 func NewServerOptions(allowEmulation bool) *ServerOptions {
 	return &ServerOptions{allowEmulation: allowEmulation}
 }
 
+func (o *ServerOptions) WithNotifier(n *notifyclient.Notifier) *ServerOptions {
+	o.notifier = n
+	return o
+}
+
+func (o *ServerOptions) WithVMStatsCollector(enabled bool) *ServerOptions {
+	o.vmStatsCollectorEnabled = enabled
+	return o
+}
+
+func (o *ServerOptions) WithVMI(vmi *v1.VirtualMachineInstance) *ServerOptions {
+	if vmi != nil {
+		o.vmiName = vmi.Name
+		o.vmiNamespace = vmi.Namespace
+		o.vmiUID = vmi.UID
+	}
+	return o
+}
+
 type Launcher struct {
-	domainManager  virtwrap.DomainManager
-	allowEmulation bool
+	domainManager virtwrap.DomainManager
+	*ServerOptions
+}
+
+func NewLauncher(domainManager virtwrap.DomainManager, options *ServerOptions) *Launcher {
+	return &Launcher{
+		domainManager: domainManager,
+		ServerOptions: options,
+	}
+}
+
+func setPluginsFromOptions(options *cmdv1.VirtualMachineOptions) error {
+	if options == nil || len(options.PluginsJson) == 0 {
+		plugins.SetPlugins(nil)
+		return nil
+	}
+	var pluginList []pluginv1alpha1.Plugin
+	if err := json.Unmarshal(options.PluginsJson, &pluginList); err != nil {
+		return fmt.Errorf("failed to deserialize plugins from options: %w", err)
+	}
+	plugins.SetPlugins(pluginList)
+	return nil
 }
 
 func getVMIFromRequest(request *cmdv1.VMI) (*v1.VirtualMachineInstance, *cmdv1.Response) {
@@ -128,14 +177,8 @@ func (l *Launcher) CancelVirtualMachineMigration(_ context.Context, request *cmd
 		return response, nil
 	}
 
-	if err := l.domainManager.CancelVMIMigration(vmi); err != nil {
-		log.Log.Object(vmi).Reason(err).Errorf("Failed to abort live migration")
-		response.Success = false
-		response.Message = getErrorMessage(err)
-		return response, nil
-	}
-
-	log.Log.Object(vmi).Info("Live migration as been aborted")
+	l.domainManager.CancelVMIMigration(vmi)
+	log.Log.Object(vmi).Info("Live migration has been aborted")
 	return response, nil
 
 }
@@ -161,6 +204,11 @@ func (l *Launcher) SyncMigrationTarget(_ context.Context, request *cmdv1.VMIRequ
 
 	vmi, response := getVMIFromRequest(request.Vmi)
 	if !response.Success {
+		return response, nil
+	}
+	if err := setPluginsFromOptions(request.Options); err != nil {
+		response.Success = false
+		response.Message = err.Error()
 		return response, nil
 	}
 
@@ -197,6 +245,11 @@ func (l *Launcher) SyncVirtualMachine(_ context.Context, request *cmdv1.VMIReque
 
 	vmi, response := getVMIFromRequest(request.Vmi)
 	if !response.Success {
+		return response, nil
+	}
+	if err := setPluginsFromOptions(request.Options); err != nil {
+		response.Success = false
+		response.Message = err.Error()
 		return response, nil
 	}
 
@@ -613,6 +666,16 @@ func (l *Launcher) GuestPing(ctx context.Context, request *cmdv1.GuestPingReques
 	if err != nil {
 		resp.Response.Success = false
 		resp.Response.Message = err.Error()
+		log.Log.Reason(err).Warning("GuestAgentPing probe failed")
+		if l.notifier != nil && l.vmiName != "" {
+			eventMsg := fmt.Sprintf("GuestAgentPing probe failed for VMI %s", l.vmiName)
+			vmiRef := v1.NewVMIReferenceFromNameWithNS(l.vmiNamespace, l.vmiName)
+			vmiRef.UID = l.vmiUID
+			if sendErr := l.notifier.SendK8sEvent(vmiRef, k8sv1.EventTypeWarning, "GuestAgentPingFailed", eventMsg); sendErr != nil {
+				log.Log.Reason(sendErr).Warning("Failed to send GuestAgentPingFailed event")
+			}
+		}
+
 		return resp, err
 	}
 	return resp, nil
@@ -622,17 +685,11 @@ func RunServer(socketPath string,
 	domainManager virtwrap.DomainManager,
 	stopChan chan struct{},
 	options *ServerOptions) (chan struct{}, error) {
-
-	allowEmulation := false
-	if options != nil {
-		allowEmulation = options.allowEmulation
-	}
-
 	grpcServer := grpc.NewServer([]grpc.ServerOption{}...)
-	server := &Launcher{
-		domainManager:  domainManager,
-		allowEmulation: allowEmulation,
+	if options == nil {
+		options = NewServerOptions(false)
 	}
+	server := NewLauncher(domainManager, options)
 	registerInfoServer(grpcServer)
 
 	// register more versions as soon as needed
@@ -647,25 +704,23 @@ func RunServer(socketPath string,
 	done := make(chan struct{})
 
 	go func() {
-		select {
-		case <-stopChan:
-			log.Log.Info("stopping cmd server")
-			stopped := make(chan struct{})
-			go func() {
-				grpcServer.Stop()
-				close(stopped)
-			}()
+		<-stopChan
+		log.Log.Info("stopping cmd server")
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.Stop()
+			close(stopped)
+		}()
 
-			select {
-			case <-stopped:
-				log.Log.Info("cmd server stopped")
-			case <-time.After(1 * time.Second):
-				log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
-			}
-			sock.Close()
-			os.Remove(socketPath)
-			close(done)
+		select {
+		case <-stopped:
+			log.Log.Info("cmd server stopped")
+		case <-time.After(1 * time.Second):
+			log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
 		}
+		sock.Close()
+		os.Remove(socketPath)
+		close(done)
 	}()
 
 	go func() {

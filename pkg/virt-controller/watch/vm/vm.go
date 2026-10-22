@@ -71,6 +71,7 @@ import (
 	storagehotplug "kubevirt.io/kubevirt/pkg/storage/hotplug"
 	"kubevirt.io/kubevirt/pkg/storage/memorydump"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
+	storageutils "kubevirt.io/kubevirt/pkg/storage/utils"
 	"kubevirt.io/kubevirt/pkg/storage/velero"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
@@ -489,10 +490,10 @@ func (c *Controller) handleCloneDataVolume(vm *virtv1.VirtualMachine, dv *cdiv1.
 
 func (c *Controller) authorizeDataVolume(vm *virtv1.VirtualMachine, dataVolume *cdiv1.DataVolume) error {
 	serviceAccountName := "default"
-	for _, vol := range vm.Spec.Template.Spec.Volumes {
-		if vol.ServiceAccount != nil {
-			serviceAccountName = vol.ServiceAccount.ServiceAccountName
-		}
+	if vm.Spec.Template.Spec.ServiceAccountName != "" {
+		serviceAccountName = vm.Spec.Template.Spec.ServiceAccountName
+	} else if sa := storageutils.ServiceAccountNameFromVolumes(vm.Spec.Template.Spec.Volumes); sa != "" {
+		serviceAccountName = sa
 	}
 
 	proxy := &authProxy{client: c.clientset, dataSourceStore: c.dataSourceStore, namespaceStore: c.namespaceStore}
@@ -904,6 +905,21 @@ func (c *Controller) handleVolumeUpdateRequest(vm *virtv1.VirtualMachine, vmi *v
 		*vm.Spec.UpdateVolumesStrategy == virtv1.UpdateVolumesStrategyReplacement:
 		log.Log.Object(vm).V(4).Infof("not handling replacement update volumes strategy")
 	case vm.Spec.UpdateVolumesStrategy != nil && *vm.Spec.UpdateVolumesStrategy == virtv1.UpdateVolumesStrategyMigration:
+		// Idempotency: if VMI has migratedVolumes the VM doesn't have yet,
+		// propagate them to the VM status (recovery from partial failure).
+		vmHasMigratedVolumes := vm.Status.VolumeUpdateState != nil &&
+			vm.Status.VolumeUpdateState.VolumeMigrationState != nil &&
+			equality.Semantic.DeepEqual(vm.Status.VolumeUpdateState.VolumeMigrationState.MigratedVolumes, vmi.Status.MigratedVolumes)
+		if len(vmi.Status.MigratedVolumes) > 0 && !vmHasMigratedVolumes &&
+			volumemig.MigratedVolumesMatchVMSpec(vmi.Status.MigratedVolumes, &vm.Spec.Template.Spec) {
+			if vm.Status.VolumeUpdateState == nil {
+				vm.Status.VolumeUpdateState = &virtv1.VolumeUpdateState{}
+			}
+			vm.Status.VolumeUpdateState.VolumeMigrationState = &virtv1.VolumeMigrationState{
+				MigratedVolumes: vmi.Status.MigratedVolumes,
+			}
+		}
+
 		if !volumemig.PersistentVolumesUpdated(&vm.Spec.Template.Spec, &vmi.Spec) {
 			log.Log.Object(vm).V(4).Infof("No persistent volumes updated")
 			return nil
@@ -1065,8 +1081,7 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 			return vm, nil
 		}
 
-		// when coming here from a different RunStrategy we have to start the VM
-		if !hasStartRequest(vm) && vm.Status.RunStrategy == runStrategy {
+		if !shouldStartRerunOnFailure(vm, runStrategy) {
 			return vm, nil
 		}
 
@@ -1210,6 +1225,15 @@ func (c *Controller) isVMIStopExpected(vm *virtv1.VirtualMachine) bool {
 	return dels > 0
 }
 
+// shouldStartRerunOnFailure reports whether a VM using the RerunOnFailure
+// strategy should create a new VMI when no VMI currently exists
+// It returns true when there is an explicit StartRequest
+// or when the RunStrategy has just been switched to RerunOnFailure from
+// a different strategy (detected via vm.Status.RunStrategy)
+func shouldStartRerunOnFailure(vm *virtv1.VirtualMachine, runStrategy virtv1.VirtualMachineRunStrategy) bool {
+	return hasStartRequest(vm) || vm.Status.RunStrategy != runStrategy
+}
+
 // isSetToStart determines whether a VM is configured to be started (running).
 func isSetToStart(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance) bool {
 	runStrategy, err := vm.RunStrategy()
@@ -1232,7 +1256,7 @@ func isSetToStart(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance)
 		if vmi != nil {
 			return vmi.Status.Phase != virtv1.Succeeded
 		}
-		return true
+		return shouldStartRerunOnFailure(vm, runStrategy)
 	case virtv1.RunStrategyOnce:
 		if vmi == nil {
 			return true
@@ -3031,7 +3055,7 @@ func (c *Controller) syncRestartRequired(lastSeenVMSpec *virtv1.VirtualMachineSp
 		lastSeenVM.Spec.Template.Spec.Tolerations = currentVM.Spec.Template.Spec.Tolerations
 	}
 
-	if !netvmliveupdate.IsRestartRequired(currentVM, vmi, c.clusterConfig) {
+	if !netvmliveupdate.IsRestartRequired(currentVM, vmi) {
 		lastSeenVM.Spec.Template.Spec.Domain.Devices.Interfaces = currentVM.Spec.Template.Spec.Domain.Devices.Interfaces
 		lastSeenVM.Spec.Template.Spec.Networks = currentVM.Spec.Template.Spec.Networks
 	}
@@ -3070,15 +3094,21 @@ func (c *Controller) syncDynamicAnnotationsAndLabelsToVMI(vm *virtv1.VirtualMach
 
 	patchSet := patch.New()
 	newVmiAnnotations := maps.Clone(vmi.Annotations)
+	if newVmiAnnotations == nil {
+		newVmiAnnotations = map[string]string{}
+	}
 	newVmiLabels := maps.Clone(vmi.Labels)
+	if newVmiLabels == nil {
+		newVmiLabels = map[string]string{}
+	}
 
-	syncMap := func(keys []string, vmMap, vmiMap, vmiOrigMap map[string]string, subPath string) {
+	syncMap := func(patterns []string, vmMap, vmiMap, vmiOrigMap map[string]string, subPath string) {
 		changed := false
-		for _, key := range keys {
+		syncKey := func(key string) {
 			vmVal, vmExists := vmMap[key]
 			vmiVal, vmiExists := vmiMap[key]
 			if vmExists == vmiExists && vmVal == vmiVal {
-				continue
+				return
 			}
 			changed = true
 			if vmExists {
@@ -3086,6 +3116,41 @@ func (c *Controller) syncDynamicAnnotationsAndLabelsToVMI(vm *virtv1.VirtualMach
 			} else {
 				delete(vmiMap, key)
 			}
+		}
+
+		syncPrefix := func(prefix string) {
+			visited := map[string]struct{}{}
+			for key := range vmMap {
+				if strings.HasPrefix(key, prefix) {
+					visited[key] = struct{}{}
+					syncKey(key)
+				}
+			}
+			for key := range vmiMap {
+				if strings.HasPrefix(key, prefix) {
+					if _, ok := visited[key]; ok {
+						continue
+					}
+					visited[key] = struct{}{}
+					syncKey(key)
+				}
+			}
+		}
+
+		for _, pattern := range patterns {
+			if pattern == "" {
+				continue
+			}
+			if strings.HasSuffix(pattern, "*") {
+				prefix := strings.TrimSuffix(pattern, "*")
+				// Reject bare "*" to prevent accidental sync-all. Only prefix wildcards like "vendor.io/*" are supported.
+				if prefix == "" {
+					continue
+				}
+				syncPrefix(prefix)
+				continue
+			}
+			syncKey(pattern)
 		}
 
 		if !changed {

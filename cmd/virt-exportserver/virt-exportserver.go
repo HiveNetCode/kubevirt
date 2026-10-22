@@ -59,7 +59,10 @@ func main() {
 		config.BackupCheckpoint = getBackupCheckpoint()
 		config.BackupCACert = getBackupCACert()
 	}
-	server := exportServer.NewExportServer(config)
+	server, err := exportServer.NewExportServer(config)
+	if err != nil {
+		panic(err)
+	}
 	service.Setup(server)
 	server.Run()
 }
@@ -78,7 +81,7 @@ func getCert() (certFile, keyFile string) {
 	if certFile == "" || keyFile == "" {
 		panic("TLS config incomplete")
 	}
-	return
+	return certFile, keyFile
 }
 
 func getListenAddr() string {
@@ -98,7 +101,7 @@ func getDeadline() (result time.Time) {
 			panic("Invalid Deadline")
 		}
 	}
-	return
+	return result
 }
 
 func getBackupUID() string {

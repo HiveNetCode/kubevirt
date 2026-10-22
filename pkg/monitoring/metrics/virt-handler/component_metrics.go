@@ -16,7 +16,7 @@
  * Copyright The KubeVirt Authors.
  */
 
-package virt_handler
+package virthandler
 
 import "github.com/rhobs/operator-observability-toolkit/pkg/operatormetrics"
 

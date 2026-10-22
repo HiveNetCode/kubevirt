@@ -90,7 +90,7 @@ QEMU_AUDIO_DRV=none \
 -name guest=default_vmi-alpine-efi,debug-threads=on \
 -S \
 -object secret,id=masterKey0,format=raw,file=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/master-key.aes \
--blockdev '{"driver":"file","filename":"/usr/share/OVMF/OVMF_CODE.fd","node-name":"libvirt-pflash0-storage","auto-read-only":true,"discard":"unmap"}' \
+-blockdev '{"driver":"file","filename":"/usr/share/edk2/ovmf/OVMF_CODE.fd","node-name":"libvirt-pflash0-storage","auto-read-only":true,"discard":"unmap"}' \
 -blockdev '{"node-name":"libvirt-pflash0-format","read-only":true,"driver":"raw","file":"libvirt-pflash0-storage"}' \
 -blockdev '{"driver":"file","filename":"/tmp/default_vmi-alpine-efi","node-name":"libvirt-pflash1-storage","auto-read-only":true,"discard":"unmap"}' \
 -blockdev '{"node-name":"libvirt-pflash1-format","read-only":false,"driver":"raw","file":"libvirt-pflash1-storage"}' \
@@ -131,7 +131,7 @@ QEMU_AUDIO_DRV=none \
 -msg timestamp=on`
 
 	qemuFormattedLogs = `{"component":"virt-launcher","level":"info","msg":"2020-07-02 09:04:39.037+0000: starting up libvirt version: 6.0.0, package: 16.fc31 (Unknown, 2020-04-07-15:55:55, ), qemu version: 4.2.0qemu-kvm-4.2.0-15.fc31, kernel: 3.10.0-1062.9.1.el7.x86_64, hostname: vmi-alpine-efi","subcomponent":"qemu","timestamp":"2020-07-02T09:04:39.303235Z"}
-{"component":"virt-launcher","level":"info","msg":"LC_ALL=C \\PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e \\XDG_DATA_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.local/share \\XDG_CACHE_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.cache \\XDG_CONFIG_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.config \\QEMU_AUDIO_DRV=none \\/usr/libexec/qemu-kvm \\-name guest=default_vmi-alpine-efi,debug-threads=on \\-S \\-object secret,id=masterKey0,format=raw,file=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/master-key.aes \\-blockdev '{\"driver\":\"file\",\"filename\":\"/usr/share/OVMF/OVMF_CODE.fd\",\"node-name\":\"libvirt-pflash0-storage\",\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-pflash0-format\",\"read-only\":true,\"driver\":\"raw\",\"file\":\"libvirt-pflash0-storage\"}' \\-blockdev '{\"driver\":\"file\",\"filename\":\"/tmp/default_vmi-alpine-efi\",\"node-name\":\"libvirt-pflash1-storage\",\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-pflash1-format\",\"read-only\":false,\"driver\":\"raw\",\"file\":\"libvirt-pflash1-storage\"}' \\-machine pc-q35-rhel8.2.0,accel=kvm,usb=off,dump-guest-core=off,pflash0=libvirt-pflash0-format,pflash1=libvirt-pflash1-format \\-cpu Skylake-Client,ss=on,hypervisor=on,tsc-adjust=on,clflushopt=on,umip=on,arch-capabilities=on,pdpe1gb=on,skip-l1dfl-vmentry=on \\-m 1024 \\-overcommit mem-lock=off \\-smp 1,sockets=1,dies=1,cores=1,threads=1 \\-object iothread,id=iothread1 \\-uuid 5c6fa8f7-c3f6-4b3f-b596-d16ea3912302 \\-smbios type=1,manufacturer=KubeVirt,product=None,uuid=5c6fa8f7-c3f6-4b3f-b596-d16ea3912302,family=KubeVirt \\-no-user-config \\-nodefaults \\-chardev socket,id=charmonitor,fd=20,server,nowait \\-mon chardev=charmonitor,id=monitor,mode=control \\-rtc base=utc \\-no-shutdown \\-boot strict=on \\-device pcie-root-port,port=0x10,chassis=1,id=pci.1,bus=pcie.0,multifunction=on,addr=0x2 \\-device pcie-root-port,port=0x11,chassis=2,id=pci.2,bus=pcie.0,addr=0x2.0x1 \\-device pcie-root-port,port=0x12,chassis=3,id=pci.3,bus=pcie.0,addr=0x2.0x2 \\-device pcie-root-port,port=0x13,chassis=4,id=pci.4,bus=pcie.0,addr=0x2.0x3 \\-device virtio-serial-pci,id=virtio-serial0,bus=pci.2,addr=0x0 \\-blockdev '{\"driver\":\"file\",\"filename\":\"/var/run/kubevirt/container-disks/disk_0.img\",\"node-name\":\"libvirt-2-storage\",\"cache\":{\"direct\":true,\"no-flush\":false},\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-2-format\",\"read-only\":true,\"cache\":{\"direct\":true,\"no-flush\":false},\"driver\":\"raw\",\"file\":\"libvirt-2-storage\"}' \\-blockdev '{\"driver\":\"file\",\"filename\":\"/var/run/kubevirt-ephemeral-disks/disk-data/containerdisk/disk.qcow2\",\"node-name\":\"libvirt-1-storage\",\"cache\":{\"direct\":true,\"no-flush\":false},\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-1-format\",\"read-only\":false,\"cache\":{\"direct\":true,\"no-flush\":false},\"driver\":\"qcow2\",\"file\":\"libvirt-1-storage\",\"backing\":\"libvirt-2-format\"}' \\-device virtio-blk-pci,scsi=off,bus=pci.3,addr=0x0,drive=libvirt-1-format,id=ua-containerdisk,bootindex=1,write-cache=on \\-netdev tap,fd=22,id=hostua-default,vhost=on,vhostfd=23 \\-device virtio-net-pci,host_mtu=1450,netdev=hostua-default,id=ua-default,mac=22:f8:ef:32:60:95,bus=pci.1,addr=0x0 \\-chardev socket,id=charserial0,fd=24,server,nowait \\-device isa-serial,chardev=charserial0,id=serial0 \\-chardev socket,id=charchannel0,fd=25,server,nowait \\-device virtserialport,bus=virtio-serial0.0,nr=1,chardev=charchannel0,id=channel0,name=org.qemu.guest_agent.0 \\-vnc vnc=unix:/var/run/kubevirt-private/6d220540-cae6-4aa3-a850-af62ff66e407/virt-vnc \\-device VGA,id=video0,vgamem_mb=16,bus=pcie.0,addr=0x1 \\-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \\-msg timestamp=on","subcomponent":"qemu","timestamp":"2020-07-02T09:04:39.303348Z"}`
+{"component":"virt-launcher","level":"info","msg":"LC_ALL=C \\PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e \\XDG_DATA_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.local/share \\XDG_CACHE_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.cache \\XDG_CONFIG_HOME=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/.config \\QEMU_AUDIO_DRV=none \\/usr/libexec/qemu-kvm \\-name guest=default_vmi-alpine-efi,debug-threads=on \\-S \\-object secret,id=masterKey0,format=raw,file=/var/lib/libvirt/qemu/domain-1-default_vmi-alpine-e/master-key.aes \\-blockdev '{\"driver\":\"file\",\"filename\":\"/usr/share/edk2/ovmf/OVMF_CODE.fd\",\"node-name\":\"libvirt-pflash0-storage\",\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-pflash0-format\",\"read-only\":true,\"driver\":\"raw\",\"file\":\"libvirt-pflash0-storage\"}' \\-blockdev '{\"driver\":\"file\",\"filename\":\"/tmp/default_vmi-alpine-efi\",\"node-name\":\"libvirt-pflash1-storage\",\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-pflash1-format\",\"read-only\":false,\"driver\":\"raw\",\"file\":\"libvirt-pflash1-storage\"}' \\-machine pc-q35-rhel8.2.0,accel=kvm,usb=off,dump-guest-core=off,pflash0=libvirt-pflash0-format,pflash1=libvirt-pflash1-format \\-cpu Skylake-Client,ss=on,hypervisor=on,tsc-adjust=on,clflushopt=on,umip=on,arch-capabilities=on,pdpe1gb=on,skip-l1dfl-vmentry=on \\-m 1024 \\-overcommit mem-lock=off \\-smp 1,sockets=1,dies=1,cores=1,threads=1 \\-object iothread,id=iothread1 \\-uuid 5c6fa8f7-c3f6-4b3f-b596-d16ea3912302 \\-smbios type=1,manufacturer=KubeVirt,product=None,uuid=5c6fa8f7-c3f6-4b3f-b596-d16ea3912302,family=KubeVirt \\-no-user-config \\-nodefaults \\-chardev socket,id=charmonitor,fd=20,server,nowait \\-mon chardev=charmonitor,id=monitor,mode=control \\-rtc base=utc \\-no-shutdown \\-boot strict=on \\-device pcie-root-port,port=0x10,chassis=1,id=pci.1,bus=pcie.0,multifunction=on,addr=0x2 \\-device pcie-root-port,port=0x11,chassis=2,id=pci.2,bus=pcie.0,addr=0x2.0x1 \\-device pcie-root-port,port=0x12,chassis=3,id=pci.3,bus=pcie.0,addr=0x2.0x2 \\-device pcie-root-port,port=0x13,chassis=4,id=pci.4,bus=pcie.0,addr=0x2.0x3 \\-device virtio-serial-pci,id=virtio-serial0,bus=pci.2,addr=0x0 \\-blockdev '{\"driver\":\"file\",\"filename\":\"/var/run/kubevirt/container-disks/disk_0.img\",\"node-name\":\"libvirt-2-storage\",\"cache\":{\"direct\":true,\"no-flush\":false},\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-2-format\",\"read-only\":true,\"cache\":{\"direct\":true,\"no-flush\":false},\"driver\":\"raw\",\"file\":\"libvirt-2-storage\"}' \\-blockdev '{\"driver\":\"file\",\"filename\":\"/var/run/kubevirt-ephemeral-disks/disk-data/containerdisk/disk.qcow2\",\"node-name\":\"libvirt-1-storage\",\"cache\":{\"direct\":true,\"no-flush\":false},\"auto-read-only\":true,\"discard\":\"unmap\"}' \\-blockdev '{\"node-name\":\"libvirt-1-format\",\"read-only\":false,\"cache\":{\"direct\":true,\"no-flush\":false},\"driver\":\"qcow2\",\"file\":\"libvirt-1-storage\",\"backing\":\"libvirt-2-format\"}' \\-device virtio-blk-pci,scsi=off,bus=pci.3,addr=0x0,drive=libvirt-1-format,id=ua-containerdisk,bootindex=1,write-cache=on \\-netdev tap,fd=22,id=hostua-default,vhost=on,vhostfd=23 \\-device virtio-net-pci,host_mtu=1450,netdev=hostua-default,id=ua-default,mac=22:f8:ef:32:60:95,bus=pci.1,addr=0x0 \\-chardev socket,id=charserial0,fd=24,server,nowait \\-device isa-serial,chardev=charserial0,id=serial0 \\-chardev socket,id=charchannel0,fd=25,server,nowait \\-device virtserialport,bus=virtio-serial0.0,nr=1,chardev=charchannel0,id=channel0,name=org.qemu.guest_agent.0 \\-vnc vnc=unix:/var/run/kubevirt-private/6d220540-cae6-4aa3-a850-af62ff66e407/virt-vnc \\-device VGA,id=video0,vgamem_mb=16,bus=pcie.0,addr=0x1 \\-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \\-msg timestamp=on","subcomponent":"qemu","timestamp":"2020-07-02T09:04:39.303348Z"}`
 )
 
 var _ = Describe("LibvirtHelper", func() {
@@ -274,6 +274,146 @@ var _ = Describe("LibvirtHelper", func() {
 		dom.Free()
 
 		Expect(wantedSpec.Devices.Disks).To(Equal(mutatedSpec.Devices.Disks))
+	})
+
+	Context("QEMUCmd preservation across sidecar hooks", func() {
+		var (
+			vmi             *v1.VirtualMachineInstance
+			ctrl            *gomock.Controller
+			mockHookManager *hooks.MockManager
+		)
+
+		BeforeEach(func() {
+			ctrl = gomock.NewController(GinkgoT())
+			vmi = api2.NewMinimalVMIWithNS("test-namespace", "test-vmi")
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			mockHookManager = hooks.NewMockManager(ctrl)
+			getHookManager = func() hooks.Manager {
+				return mockHookManager
+			}
+		})
+
+		AfterEach(func() {
+			getHookManager = hooks.GetManager
+		})
+
+		marshalSpec := func(spec *api.DomainSpec, _ *v1.VirtualMachineInstance) (string, error) {
+			xmlBytes, err := xml.MarshalIndent(spec, "", "\t")
+			if err != nil {
+				return "", err
+			}
+			return string(xmlBytes), nil
+		}
+
+		It("should preserve QEMUCmd args and envs across the round-trip", func() {
+			wantedSpec := &api.DomainSpec{
+				Type:  "kvm",
+				XmlNS: "http://libvirt.org/schemas/domain/qemu/1.0",
+				Name:  "test-vm",
+				QEMUCmd: &api.Commandline{
+					QEMUArg: []api.Arg{
+						{Value: "-fw_cfg"},
+						{Value: "name=opt/com.coreos/config,file=/var/run/test/data.ign"},
+					},
+					QEMUEnv: []api.Env{
+						{Name: "QEMU_AUDIO_DRV", Value: "none"},
+					},
+				},
+			}
+
+			mockHookManager.EXPECT().OnDefineDomain(wantedSpec, vmi).DoAndReturn(marshalSpec)
+
+			_, err := ApplySidecarHooks(vmi, wantedSpec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wantedSpec.QEMUCmd).NotTo(BeNil())
+			Expect(wantedSpec.QEMUCmd.QEMUArg).To(HaveLen(2))
+			Expect(wantedSpec.QEMUCmd.QEMUArg[0].Value).To(Equal("-fw_cfg"))
+			Expect(wantedSpec.QEMUCmd.QEMUArg[1].Value).To(
+				Equal("name=opt/com.coreos/config,file=/var/run/test/data.ign"))
+			Expect(wantedSpec.QEMUCmd.QEMUEnv).To(HaveLen(1))
+			Expect(wantedSpec.QEMUCmd.QEMUEnv[0].Name).To(Equal("QEMU_AUDIO_DRV"))
+			Expect(wantedSpec.QEMUCmd.QEMUEnv[0].Value).To(Equal("none"))
+		})
+
+		It("should not introduce QEMUCmd when the spec has none", func() {
+			wantedSpec := &api.DomainSpec{
+				Type: "kvm",
+				Name: "test-vm",
+			}
+
+			mockHookManager.EXPECT().OnDefineDomain(wantedSpec, vmi).DoAndReturn(marshalSpec)
+
+			_, err := ApplySidecarHooks(vmi, wantedSpec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wantedSpec.QEMUCmd).To(BeNil())
+		})
+
+		It("should capture hook-added QEMUCmd args", func() {
+			wantedSpec := &api.DomainSpec{
+				Type:  "kvm",
+				XmlNS: "http://libvirt.org/schemas/domain/qemu/1.0",
+				Name:  "test-vm",
+				QEMUCmd: &api.Commandline{
+					QEMUArg: []api.Arg{
+						{Value: "-fw_cfg"},
+						{Value: "name=opt/com.coreos/config,file=/var/run/test/data.ign"},
+					},
+				},
+			}
+
+			mockHookManager.EXPECT().OnDefineDomain(wantedSpec, vmi).DoAndReturn(
+				func(spec *api.DomainSpec, _ *v1.VirtualMachineInstance) (string, error) {
+					modified := spec.DeepCopy()
+					modified.QEMUCmd.QEMUArg = append(modified.QEMUCmd.QEMUArg,
+						api.Arg{Value: "-device"},
+						api.Arg{Value: "virtio-rng"},
+					)
+					xmlBytes, err := xml.MarshalIndent(modified, "", "\t")
+					if err != nil {
+						return "", err
+					}
+					return string(xmlBytes), nil
+				},
+			)
+
+			_, err := ApplySidecarHooks(vmi, wantedSpec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wantedSpec.QEMUCmd).NotTo(BeNil())
+			Expect(wantedSpec.QEMUCmd.QEMUArg).To(HaveLen(4))
+			Expect(wantedSpec.QEMUCmd.QEMUArg[2].Value).To(Equal("-device"))
+			Expect(wantedSpec.QEMUCmd.QEMUArg[3].Value).To(Equal("virtio-rng"))
+		})
+
+		It("should not restore QEMUCmd when the hook removed it", func() {
+			wantedSpec := &api.DomainSpec{
+				Type:  "kvm",
+				XmlNS: "http://libvirt.org/schemas/domain/qemu/1.0",
+				Name:  "test-vm",
+				QEMUCmd: &api.Commandline{
+					QEMUArg: []api.Arg{
+						{Value: "-fw_cfg"},
+						{Value: "name=opt/com.coreos/config,file=/var/run/test/data.ign"},
+					},
+				},
+			}
+
+			mockHookManager.EXPECT().OnDefineDomain(wantedSpec, vmi).DoAndReturn(
+				func(spec *api.DomainSpec, _ *v1.VirtualMachineInstance) (string, error) {
+					stripped := spec.DeepCopy()
+					stripped.QEMUCmd = nil
+					stripped.XmlNS = ""
+					xmlBytes, err := xml.MarshalIndent(stripped, "", "\t")
+					if err != nil {
+						return "", err
+					}
+					return string(xmlBytes), nil
+				},
+			)
+
+			_, err := ApplySidecarHooks(vmi, wantedSpec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wantedSpec.QEMUCmd).To(BeNil())
+		})
 	})
 
 	Context("getLibvirtLogFilters()", func() {

@@ -26,15 +26,19 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	"kubevirt.io/client-go/log"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
+	virtv1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
+	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 )
 
@@ -48,19 +52,23 @@ const (
 )
 
 type VMBackupSource struct {
-	vmBackup *backupv1.VirtualMachineBackup
-	caCert   string
+	vmBackup        *backupv1.VirtualMachineBackup
+	caCert          string
+	sanitizedVMName string
 }
 
-func NewVMBackupSource(vmBackup *backupv1.VirtualMachineBackup, caCert string) *VMBackupSource {
+func NewVMBackupSource(vmBackup *backupv1.VirtualMachineBackup, caCert string, sanitizedVMName string) *VMBackupSource {
 	return &VMBackupSource{
-		vmBackup: vmBackup,
-		caCert:   caCert,
+		vmBackup:        vmBackup,
+		caCert:          caCert,
+		sanitizedVMName: sanitizedVMName,
 	}
 }
 
 func (s *VMBackupSource) IsSourceAvailable() bool {
-	return s.hasCondition(backupv1.ConditionProgressing)
+	return s.vmBackup != nil &&
+		s.vmBackup.Status != nil &&
+		meta.IsStatusConditionTrue(s.vmBackup.Status.Conditions, string(backupv1.ConditionProgressing))
 }
 
 func (s *VMBackupSource) HasContent() bool {
@@ -77,11 +85,11 @@ func (s *VMBackupSource) SourceCondition() exportv1.Condition {
 	if !s.HasContent() {
 		return newReadyCondition(corev1.ConditionFalse, vmBackupReadyReason, vmBackupNoContent)
 	}
-	cond := s.condition(backupv1.ConditionProgressing)
+	cond := meta.FindStatusCondition(s.vmBackup.Status.Conditions, string(backupv1.ConditionProgressing))
 	if cond == nil {
 		return newReadyCondition(corev1.ConditionFalse, vmBackupReadyReason, vmBackupNoProgressingCondition)
 	}
-	if cond.Status == corev1.ConditionFalse {
+	if cond.Status == metav1.ConditionFalse {
 		return newReadyCondition(corev1.ConditionFalse, vmBackupReadyReason, cond.Message)
 	}
 	return newReadyCondition(corev1.ConditionTrue, vmBackupReadyReason, cond.Message)
@@ -129,6 +137,30 @@ func (s *VMBackupSource) ConfigurePod(pod *corev1.Pod) {
 				Name:  "BACKUP_CHECKPOINT",
 				Value: *s.vmBackup.Status.CheckpointName,
 			})
+
+			// Add pod affinity to co-locate with virt-launcher pod when CBT is enabled
+			// This enables local access to checkpoint data instead of network transfer
+			if pod.Spec.Affinity == nil {
+				pod.Spec.Affinity = &corev1.Affinity{}
+			}
+			if pod.Spec.Affinity.PodAffinity == nil {
+				pod.Spec.Affinity.PodAffinity = &corev1.PodAffinity{}
+			}
+			pod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+				pod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+				corev1.WeightedPodAffinityTerm{
+					Weight: 100,
+					PodAffinityTerm: corev1.PodAffinityTerm{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								virtv1.AppLabel:                          "virt-launcher",
+								virtv1.DeprecatedVirtualMachineNameLabel: s.sanitizedVMName,
+							},
+						},
+						TopologyKey: "kubernetes.io/hostname",
+					},
+				},
+			)
 		}
 	}
 }
@@ -185,26 +217,6 @@ func (s *VMBackupSource) UpdateStatus(vmExport *exportv1.VirtualMachineExport, p
 
 	vmExport.Status.Conditions = updateCondition(vmExport.Status.Conditions, s.SourceCondition())
 	return requeue, nil
-}
-
-func (s *VMBackupSource) hasCondition(condType backupv1.ConditionType) bool {
-	if s.vmBackup.Status == nil {
-		return false
-	}
-	cond := s.condition(condType)
-	return cond != nil && cond.Status == corev1.ConditionTrue
-}
-
-func (s *VMBackupSource) condition(condType backupv1.ConditionType) *backupv1.Condition {
-	if s.vmBackup.Status == nil {
-		return nil
-	}
-	for _, cond := range s.vmBackup.Status.Conditions {
-		if cond.Type == condType {
-			return cond.DeepCopy()
-		}
-	}
-	return nil
 }
 
 func (ctrl *VMExportController) handleVMBackup(obj any) {
@@ -271,4 +283,42 @@ func backupMapURI(volumeName string) string {
 
 func backupDataURI(volumeName string) string {
 	return path.Join(backupsBasePath, volumeName, "data")
+}
+
+func (ctrl *VMExportController) getBackupTracker(namespace, name string) (*backupv1.VirtualMachineBackupTracker, bool, error) {
+	key := controller.NamespacedKey(namespace, name)
+	obj, exists, err := ctrl.VMBackupTrackerInformer.GetStore().GetByKey(key)
+	if err != nil || !exists {
+		return nil, exists, err
+	}
+	return obj.(*backupv1.VirtualMachineBackupTracker).DeepCopy(), true, nil
+}
+
+// getBackupSourceName resolves the actual VM name from the backup's source,
+// handling both direct VM sources and VirtualMachineBackupTracker sources.
+// The returned name is sanitized to match how virt-launcher pod labels are set.
+func (ctrl *VMExportController) getBackupSourceName(vmBackup *backupv1.VirtualMachineBackup) (string, error) {
+	var vmName string
+
+	if vmBackup.Spec.Source.Kind == backupv1.VirtualMachineBackupTrackerGroupVersionKind.Kind {
+		tracker, exists, err := ctrl.getBackupTracker(vmBackup.Namespace, vmBackup.Spec.Source.Name)
+		if err != nil {
+			return "", fmt.Errorf("error fetching backup tracker %s/%s: %w", vmBackup.Namespace, vmBackup.Spec.Source.Name, err)
+		}
+		if !exists {
+			return "", fmt.Errorf("VirtualMachineBackupTracker not found: %s/%s", vmBackup.Namespace, vmBackup.Spec.Source.Name)
+		}
+		vmName = tracker.Spec.Source.Name
+	} else {
+		vmName = vmBackup.Spec.Source.Name
+	}
+
+	vmi, exists, err := ctrl.getVmi(vmBackup.Namespace, vmName)
+	if err != nil {
+		return "", fmt.Errorf("error fetching VMI %s/%s: %w", vmBackup.Namespace, vmName, err)
+	}
+	if !exists {
+		return "", fmt.Errorf("VMI not found: %s/%s", vmBackup.Namespace, vmName)
+	}
+	return dns.SanitizeHostname(vmi), nil
 }

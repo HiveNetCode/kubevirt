@@ -25,6 +25,7 @@ rules:
   - kubevirt-virt-handler-server-certs
   - kubevirt-virt-handler-migration-client-certs
   - kubevirt-virt-handler-vsock-client-certs
+  - kubevirt-virt-handler-monitoring-client-certs
   - kubevirt-operator-certs
   - kubevirt-virt-api-certs
   - kubevirt-controller-certs
@@ -726,6 +727,14 @@ rules:
   - delete
   - patch
 - apiGroups:
+  - template.kubevirt.io
+  resources:
+  - virtualmachinetemplates
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - pool.kubevirt.io
   resources:
   - virtualmachinepools
@@ -890,7 +899,6 @@ rules:
   - virtualmachineinstances
   verbs:
   - update
-  - patch
   - list
   - watch
 - apiGroups:
@@ -951,11 +959,13 @@ rules:
   - watch
   - patch
 - apiGroups:
-  - apps
+  - plugin.kubevirt.io
   resources:
-  - controllerrevisions
+  - plugins
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - export.kubevirt.io
   resources:
@@ -1142,6 +1152,19 @@ rules:
   - watch
   - deletecollection
 - apiGroups:
+  - plugin.kubevirt.io
+  resources:
+  - plugins
+  verbs:
+  - get
+  - delete
+  - create
+  - update
+  - patch
+  - list
+  - watch
+  - deletecollection
+- apiGroups:
   - export.kubevirt.io
   resources:
   - virtualmachineexports
@@ -1473,6 +1496,14 @@ rules:
   - migrations.kubevirt.io
   resources:
   - migrationpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - plugin.kubevirt.io
+  resources:
+  - plugins
   verbs:
   - get
   - list

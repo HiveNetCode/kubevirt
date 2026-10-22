@@ -27,10 +27,10 @@ import (
 	"strings"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 
 	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1197,6 +1197,56 @@ var _ = Describe("Snapshot controlleer", func() {
 				updatedSnapshot.Status.CreationTime = timeFunc()
 				updatedSnapshot.Status.ReadyToUse = pointer.P(true)
 				updatedSnapshot.Status.Phase = snapshotv1.Succeeded
+				updatedSnapshot.Status.Indications = []snapshotv1.Indication{
+					snapshotv1.VMSnapshotPartialSnapshotIndication,
+				}
+				updatedSnapshot.Status.SourceIndications = []snapshotv1.SourceIndication{
+					{
+						Indication: snapshotv1.VMSnapshotPartialSnapshotIndication,
+						Message:    IndicationMessage(snapshotv1.VMSnapshotPartialSnapshotIndication),
+					},
+				}
+				updatedSnapshot.Status.Conditions = []snapshotv1.Condition{
+					newProgressingCondition(corev1.ConditionFalse, "Operation complete"),
+					newReadyCondition(corev1.ConditionTrue, "Ready"),
+				}
+				updatedSnapshot.Status.SnapshotVolumes = &snapshotv1.SnapshotVolumesLists{
+					IncludedVolumes: []string{diskName},
+					ExcludedVolumes: []string{"disk2"},
+				}
+
+				vmSource.Add(vm)
+				vmSnapshotContentSource.Add(vmSnapshotContent)
+				updateStatusCalls := expectVMSnapshotUpdateStatus(vmSnapshotClient, updatedSnapshot)
+				addVirtualMachineSnapshot(vmSnapshot)
+				controller.processVMSnapshotWorkItem()
+				Expect(*updateStatusCalls).To(Equal(1))
+			})
+
+			It("should not add partial snapshot indication when only non-snapshottable volumes are excluded", func() {
+				vmSnapshotContent := createReadyVMSnapshotContent()
+				vm := createLockedVM()
+				// Add a non-snapshottable volume (ConfigMap) that will be excluded
+				vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
+					Name: "config-volume",
+					VolumeSource: v1.VolumeSource{
+						ConfigMap: &v1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "test-config",
+							},
+						},
+					},
+				})
+				vmSnapshotContent.Spec.Source.VirtualMachine.Spec = *vm.Spec.DeepCopy()
+
+				vmSnapshot := createVMSnapshotInProgress()
+				updatedSnapshot := vmSnapshot.DeepCopy()
+				updatedSnapshot.ResourceVersion = "1"
+				updatedSnapshot.Status.SourceUID = &vmUID
+				updatedSnapshot.Status.VirtualMachineSnapshotContentName = &vmSnapshotContent.Name
+				updatedSnapshot.Status.CreationTime = timeFunc()
+				updatedSnapshot.Status.ReadyToUse = pointer.P(true)
+				updatedSnapshot.Status.Phase = snapshotv1.Succeeded
 				updatedSnapshot.Status.Indications = nil
 				updatedSnapshot.Status.SourceIndications = nil
 				updatedSnapshot.Status.Conditions = []snapshotv1.Condition{
@@ -1205,7 +1255,7 @@ var _ = Describe("Snapshot controlleer", func() {
 				}
 				updatedSnapshot.Status.SnapshotVolumes = &snapshotv1.SnapshotVolumesLists{
 					IncludedVolumes: []string{diskName},
-					ExcludedVolumes: []string{"disk2"},
+					ExcludedVolumes: []string{"config-volume"},
 				}
 
 				vmSource.Add(vm)

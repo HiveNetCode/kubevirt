@@ -31,13 +31,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gstruct"
+	"github.com/openshift/library-go/pkg/build/naming"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	backupapi "kubevirt.io/api/backup"
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
@@ -53,6 +56,7 @@ import (
 	cbt "kubevirt.io/kubevirt/pkg/storage/cbt"
 	exportServer "kubevirt.io/kubevirt/pkg/storage/export/virt-exportserver"
 	"kubevirt.io/kubevirt/pkg/storage/velero"
+	"kubevirt.io/kubevirt/pkg/util/net/dns"
 
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
@@ -117,6 +121,80 @@ var _ = Describe(SIG("Backup", func() {
 		Entry("should succeed", getTargetPVCSizeWithOverhead(cd.AlpineVolumeSize), 1),
 		Entry("2 backups to the same PVC should succeed", getDoubleTargetPVCSize(cd.AlpineVolumeSize), 2),
 	)
+
+	It("Should expose FS Freeze status early in backup", func() {
+		dv := libdv.NewDataVolume(
+			libdv.WithRegistryURLSource(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpineTestTooling)),
+			libdv.WithNamespace(testsuite.GetTestNamespace(nil)),
+			libdv.WithStorage(
+				libdv.StorageWithVolumeSize(cd.AlpineVolumeSize),
+			),
+		)
+		vm = libstorage.RenderVMWithDataVolumeTemplate(dv,
+			libvmi.WithLabels(cbt.CBTLabel),
+			libvmi.WithRunStrategy(v1.RunStrategyAlways),
+		)
+
+		By(fmt.Sprintf("Creating VM %s", vm.Name))
+		vm, err = virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Eventually(matcher.ThisVMIWith(vm.Namespace, vm.Name), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+		libstorage.WaitForCBTEnabled(virtClient, vm.Namespace, vm.Name)
+
+		targetPVC := libstorage.CreateFSPVC("target-pvc", testsuite.GetTestNamespace(vm), getTargetPVCSizeWithOverhead(cd.AlpineVolumeSize), libstorage.WithStorageProfile())
+
+		By("Creating BackupTracker")
+		tracker := createBackupTracker(virtClient, vm)
+
+		tokenValue := "backup-token-" + rand.String(5)
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "backup-secret-" + rand.String(5),
+				Namespace: vm.Namespace,
+			},
+			StringData: map[string]string{
+				"token": tokenValue,
+			},
+		}
+		_, err = virtClient.CoreV1().Secrets(vm.Namespace).Create(context.Background(), tokenSecret, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Creating backup")
+		backupName := backupName(vm.Name)
+		backup := NewBackup(backupName, vm.Namespace, targetPVC.Name)
+		backup.Spec.Source = corev1.TypedLocalObjectReference{
+			APIGroup: pointer.P(backupapi.GroupName),
+			Kind:     backupv1.VirtualMachineBackupTrackerGroupVersionKind.Kind,
+			Name:     tracker.Name,
+		}
+		backup.Spec.Mode = pointer.P(backupv1.PullMode)
+		backup.Spec.TokenSecretRef = tokenSecret.Name
+		backup, err = virtClient.VirtualMachineBackup(backup.Namespace).Create(context.Background(), backup, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Waiting for Quiesced condition to be set early (before backup completion)")
+		Eventually(func() *metav1.Condition {
+			var err error
+			backup, err = virtClient.VirtualMachineBackup(backup.Namespace).Get(context.Background(), backup.Name, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			if backup.Status == nil {
+				return nil
+			}
+			return meta.FindStatusCondition(backup.Status.Conditions, string(backupv1.ConditionQuiesced))
+		}, 60*time.Second, 2*time.Second).ShouldNot(BeNil(), "Quiesced condition should be set early in backup process")
+
+		By("Verifying Quiesced condition is True with Succeeded reason")
+		condition := meta.FindStatusCondition(backup.Status.Conditions, string(backupv1.ConditionQuiesced))
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionTrue), "Quiesced condition should be True when guest agent is available")
+		Expect(condition.Reason).To(Equal(backupv1.ReasonQuiesceSucceeded))
+
+		By("Waiting for export to be ready before cleanup")
+		backup = waitBackupExportReady(virtClient, backup.Namespace, backup.Name)
+
+		By("Deleting backup")
+		deleteVMBackup(virtClient, backup.Namespace, backup.Name)
+	})
 
 	It("Full and Incremental Backup with BackupTracker", func() {
 		const (
@@ -706,11 +784,9 @@ var _ = Describe(SIG("Backup", func() {
 		By("Creating full backup and wait for it to fail")
 		backup := createAndVerifyBackupWithTracker(virtClient, backupName(vm.Name), tracker.Namespace, smallFSDv.Name, tracker.Name, waitBackupFailed)
 		Expect(backup).ToNot(BeNil())
-		for _, cond := range backup.Status.Conditions {
-			if cond.Type == backupv1.ConditionDone {
-				Expect(cond.Reason).To(ContainSubstring("No space left on device"))
-			}
-		}
+		Expect(backup.Status).To(Not(BeNil()))
+		cond := meta.FindStatusCondition(backup.Status.Conditions, string(backupv1.ConditionFailed))
+		Expect(cond.Message).To(ContainSubstring("No space left on device"))
 
 		By("Verifying BackupTracker was not updated with a checkpoint")
 		tracker, err = virtClient.VirtualMachineBackupTracker(tracker.Namespace).Get(context.Background(), tracker.Name, metav1.GetOptions{})
@@ -860,6 +936,7 @@ var _ = Describe(SIG("Backup", func() {
 
 		fullBackup = waitBackupExportReady(virtClient, fullBackup.Namespace, fullBackup.Name)
 		verifyPullEndpoints(virtClient, fullBackup, fullBackup.Status.Type, tokenValue)
+		verifyExportPodAffinity(virtClient, fullBackup, vm)
 
 		By("Deleting the Full Backup to finalize the libvirt job and persist the checkpoint")
 		deleteVMBackup(virtClient, vm.Namespace, fullBackup.Name)
@@ -886,9 +963,10 @@ var _ = Describe(SIG("Backup", func() {
 
 		incBackup = waitBackupExportReady(virtClient, incBackup.Namespace, incBackup.Name)
 		verifyPullEndpoints(virtClient, incBackup, incBackup.Status.Type, tokenValue)
+		verifyExportPodAffinity(virtClient, incBackup, vm)
 	})
 
-	It("Pull mode backup data integrity and export immutability", func() {
+	It("Pull mode backup data integrity and export immutability", decorators.RequiresBlockStorage, func() {
 		const (
 			secondaryDiskSize = "256Mi"
 			testOffset        = 1048576
@@ -1051,10 +1129,6 @@ var _ = Describe(SIG("Backup", func() {
 		backup, err = virtClient.VirtualMachineBackup(backup.Namespace).Create(context.Background(), backup, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
-		By("Waiting for the export to become ready")
-		backup = waitBackupExportReady(virtClient, backup.Namespace, backup.Name)
-		Expect(backup).ToNot(BeNil())
-
 		By(fmt.Sprintf("Waiting %s for the TTL to expire and VMExport to be cleaned up", ttlDuration))
 		Eventually(func() error {
 			_, err := virtClient.VirtualMachineExport(backup.Namespace).Get(context.Background(), backup.Name, metav1.GetOptions{})
@@ -1203,7 +1277,9 @@ var _ = Describe("Backup with migration", func() {
 				),
 			)
 
-			vm = libstorage.RenderVMWithDataVolumeTemplate(dv,
+			vm = libvmi.NewVirtualMachine(
+				libstorage.RenderVMIWithDataVolume(dv.Name, dv.Namespace, libvmi.WithMemoryRequest(libvmifact.FedoraMemory)),
+				libvmi.WithDataVolumeTemplate(dv),
 				libvmi.WithLabels(cbt.CBTLabel),
 				libvmi.WithRunStrategy(v1.RunStrategyAlways),
 			)
@@ -1298,12 +1374,9 @@ var _ = Describe("Backup with migration", func() {
 			By("Verifying incremental backup size matches the amount of data written (not full disk size)")
 			verifyBackupTargetPVCOutput(virtClient, incrementalBackupPVC, vm.Name, 1, []int64{testDataSizeBytes})
 		},
-		Entry("[sig-compute-migrations] RWX backend storage", decorators.SigComputeMigrations, decorators.RequiresTwoSchedulableNodes, decorators.RequiresRWXFsVMStateStorageClass,
+		Entry("[sig-compute-migrations] RWX backend storage", decorators.SigComputeMigrations, decorators.RequiresTwoSchedulableNodes, decorators.RequiresRWXFsVMStateStorageClass, decorators.NoFlakeCheck,
 			corev1.ReadWriteMany),
-		// TODO: Currently there is a bug in libvirt where the bitmap migration fails when using RWO block storage.
-		// Will remove the skip once the bug fix is released. (it passed locally with custom libvirt patch)
-		// Bug: https://issues.redhat.com/browse/RHEL-145770
-		PEntry("[sig-storage] RWO backend storage", decorators.SigStorage, decorators.RequiresTwoSchedulableNodes, decorators.RequiresRWOFsVMStateStorageClass, decorators.RequiresRWXBlock,
+		Entry("[sig-storage] RWO backend storage", decorators.SigStorage, decorators.RequiresTwoSchedulableNodes, decorators.RequiresRWOFsVMStateStorageClass, decorators.RequiresRWXBlock,
 			corev1.ReadWriteOnce),
 	)
 })
@@ -1415,17 +1488,21 @@ func waitBackupSucceeded(virtClient kubecli.KubevirtClient, namespace string, ba
 		gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
 			"Conditions": ContainElements(
 				gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Type":   Equal(backupv1.ConditionDone),
-					"Status": Equal(corev1.ConditionTrue),
-					"Reason": ContainSubstring("Successfully completed VirtualMachineBackup")}),
+					"Type":    Equal(string(backupv1.ConditionComplete)),
+					"Status":  Equal(metav1.ConditionTrue),
+					"Message": ContainSubstring("Successfully completed VirtualMachineBackup")}),
 				gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Type":   Equal(backupv1.ConditionProgressing),
-					"Status": Equal(corev1.ConditionFalse)}),
+					"Type":   Equal(string(backupv1.ConditionProgressing)),
+					"Status": Equal(metav1.ConditionFalse)}),
 			),
 		})),
 	))
 
 	events.ExpectEvent(vmbackup, corev1.EventTypeNormal, "VirtualMachineBackupCompletedSuccessfully")
+
+	condition := meta.FindStatusCondition(vmbackup.Status.Conditions, string(backupv1.ConditionQuiesced))
+	Expect(condition).ToNot(BeNil(), "Quiesced condition should be set in successful backups")
+
 	return vmbackup
 }
 
@@ -1444,12 +1521,12 @@ func waitBackupFailed(virtClient kubecli.KubevirtClient, namespace string, backu
 		gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
 			"Conditions": ContainElements(
 				gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Type":   Equal(backupv1.ConditionDone),
-					"Status": Equal(corev1.ConditionTrue),
-					"Reason": ContainSubstring("Backup has failed")}),
+					"Type":    Equal(string(backupv1.ConditionFailed)),
+					"Status":  Equal(metav1.ConditionTrue),
+					"Message": ContainSubstring("Backup has failed")}),
 				gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Type":   Equal(backupv1.ConditionProgressing),
-					"Status": Equal(corev1.ConditionFalse)}),
+					"Type":   Equal(string(backupv1.ConditionProgressing)),
+					"Status": Equal(metav1.ConditionFalse)}),
 			),
 		})),
 	))
@@ -1473,8 +1550,9 @@ func waitBackupExportReady(virtClient kubecli.KubevirtClient, namespace string, 
 		gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
 			"Conditions": ContainElements(
 				gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Type":   Equal(backupv1.ConditionExportReady),
-					"Status": Equal(corev1.ConditionTrue),
+					"Type":   Equal(string(backupv1.ConditionProgressing)),
+					"Status": Equal(metav1.ConditionTrue),
+					"Reason": Equal(backupv1.ReasonExportReady),
 				}),
 			),
 		})),
@@ -1796,6 +1874,97 @@ func verifyPullEndpointsWithDataCheck(virtClient kubecli.KubevirtClient, vmbacku
 
 	err = virtClient.CoreV1().ConfigMaps(caConfigMap.Namespace).Delete(context.Background(), caConfigMap.Name, metav1.DeleteOptions{})
 	Expect(err).ToNot(HaveOccurred())
+}
+
+// verifyExportPodAffinity verifies that the VMExport pod has proper affinity
+// to co-locate with the virt-launcher pod when CBT is enabled
+func verifyExportPodAffinity(virtClient kubecli.KubevirtClient, vmbackup *backupv1.VirtualMachineBackup, vm *v1.VirtualMachine) {
+	By("Verifying VMExport pod has affinity to co-locate with virt-launcher")
+
+	// Get the VMExport (same name as backup)
+	vmExport, err := virtClient.VirtualMachineExport(vmbackup.Namespace).Get(
+		context.Background(),
+		vmbackup.Name,
+		metav1.GetOptions{},
+	)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(vmExport).ToNot(BeNil())
+
+	// Construct the export pod name using the same naming logic as the controller
+	exportPodName := naming.GetName("virt-export", vmExport.Name, validation.DNS1035LabelMaxLength)
+
+	// Get the export exportPod
+	exportPod, err := virtClient.CoreV1().Pods(vmbackup.Namespace).Get(
+		context.Background(),
+		exportPodName,
+		metav1.GetOptions{},
+	)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(exportPod).ToNot(BeNil())
+
+	// Verify affinity is set
+	Expect(exportPod.Spec.Affinity).ToNot(BeNil(), "Pod affinity should be set when CBT is enabled")
+	Expect(exportPod.Spec.Affinity.PodAffinity).ToNot(BeNil(), "Pod affinity should include PodAffinity")
+	Expect(exportPod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution).To(
+		HaveLen(1),
+		"Should have exactly one preferred pod affinity term",
+	)
+
+	prefferedAffinityTerm := exportPod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
+	Expect(prefferedAffinityTerm.Weight).To(Equal(int32(100)))
+	Expect(prefferedAffinityTerm.PodAffinityTerm).ToNot(BeNil())
+	affinityTerm := prefferedAffinityTerm.PodAffinityTerm
+
+	// Verify topology key
+	Expect(affinityTerm.TopologyKey).To(
+		Equal("kubernetes.io/hostname"),
+		"Affinity should use hostname topology key for node co-location",
+	)
+
+	// Verify label selector
+	Expect(affinityTerm.LabelSelector).ToNot(BeNil())
+	Expect(affinityTerm.LabelSelector.MatchLabels).To(
+		HaveKeyWithValue(v1.AppLabel, "virt-launcher"),
+		"Should match virt-launcher pods",
+	)
+
+	// Get the sanitized VM name (what virt-launcher pod uses)
+	vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(
+		context.Background(),
+		vm.Name,
+		metav1.GetOptions{},
+	)
+	Expect(err).ToNot(HaveOccurred())
+
+	// The virt-launcher pod label uses dns.SanitizeHostname logic
+	expectedVMName := dns.SanitizeHostname(vmi)
+
+	Expect(affinityTerm.LabelSelector.MatchLabels).To(
+		HaveKeyWithValue(v1.DeprecatedVirtualMachineNameLabel, expectedVMName),
+		"Should match the sanitized VM name",
+	)
+
+	// Verify the pods are actually on the same node
+	By("Verifying export pod is scheduled on the same node as virt-launcher")
+	// Find the virt-launcher pod using label selector
+	vmiPods, err := virtClient.CoreV1().Pods(vmi.Namespace).List(
+		context.Background(),
+		metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=virt-launcher,%s=%s",
+				v1.AppLabel,
+				v1.CreatedByLabel,
+				string(vmi.UID),
+			),
+		},
+	)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(vmiPods.Items).To(HaveLen(1), "Should find exactly one virt-launcher pod for the VMI")
+
+	vmiPod := &vmiPods.Items[0]
+	Expect(exportPod.Spec.NodeName).To(
+		Equal(vmiPod.Spec.NodeName),
+		"Export pod should be on the same node as virt-launcher pod",
+	)
 }
 
 func withCloudInitNoCloudDummy() libvmi.VMOption {

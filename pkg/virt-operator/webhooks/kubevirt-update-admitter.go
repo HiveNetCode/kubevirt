@@ -40,9 +40,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/kubernetes"
 
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/pointer"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -52,12 +52,12 @@ import (
 
 // KubeVirtUpdateAdmitter validates KubeVirt updates
 type KubeVirtUpdateAdmitter struct {
-	Client        kubecli.KubevirtClient
+	Client        kubernetes.Interface
 	ClusterConfig *virtconfig.ClusterConfig
 }
 
 // NewKubeVirtUpdateAdmitter creates a KubeVirtUpdateAdmitter
-func NewKubeVirtUpdateAdmitter(client kubecli.KubevirtClient, clusterConfig *virtconfig.ClusterConfig) *KubeVirtUpdateAdmitter {
+func NewKubeVirtUpdateAdmitter(client kubernetes.Interface, clusterConfig *virtconfig.ClusterConfig) *KubeVirtUpdateAdmitter {
 	return &KubeVirtUpdateAdmitter{
 		Client:        client,
 		ClusterConfig: clusterConfig,
@@ -82,6 +82,10 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ctx context.Context, ar *admission
 	results = append(results, validateGuestToRequestHeadroom(newKV.Spec.Configuration.AdditionalGuestMemoryOverheadRatio)...)
 	results = append(results, validateVirtTemplateDeployment(&newKV.Spec.Configuration)...)
 	results = append(results, validateRoleAggregationStrategy(&newKV.Spec.Configuration)...)
+	results = append(results, validateMigrationConfiguration(
+		&currKV.Spec.Configuration,
+		&newKV.Spec.Configuration,
+	)...)
 
 	if !equality.Semantic.DeepEqual(currKV.Spec.Configuration.TLSConfiguration, newKV.Spec.Configuration.TLSConfiguration) {
 		if newKV.Spec.Configuration.TLSConfiguration != nil {
@@ -318,7 +322,7 @@ func validateSeccompConfiguration(field *field.Path, seccompConf *v1.SeccompConf
 
 }
 
-func validateWorkloadPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
+func validateWorkloadPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubernetes.Interface) []metav1.StatusCause {
 	statuses := []metav1.StatusCause{}
 
 	const (
@@ -372,7 +376,7 @@ func validateWorkloadPlacement(ctx context.Context, namespace string, placementC
 	return statuses
 }
 
-func validateInfraPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubecli.KubevirtClient) []metav1.StatusCause {
+func validateInfraPlacement(ctx context.Context, namespace string, placementConfig *v1.NodePlacement, client kubernetes.Interface) []metav1.StatusCause {
 	statuses := []metav1.StatusCause{}
 
 	const (
@@ -528,7 +532,7 @@ func validateFeatureGates(devConfig *v1.DeveloperConfiguration) (causes []metav1
 }
 
 func hasFeatureGateEnabled(config *v1.KubeVirtConfiguration, gate string) bool {
-	return config.DeveloperConfiguration != nil && slices.Contains(config.DeveloperConfiguration.FeatureGates, gate)
+	return featuregate.IsEnabled(gate, config.DeveloperConfiguration)
 }
 
 func validateVirtTemplateDeployment(config *v1.KubeVirtConfiguration) []metav1.StatusCause {
@@ -562,4 +566,30 @@ func validateRoleAggregationStrategy(config *v1.KubeVirtConfiguration) []metav1.
 		Field:   "spec.configuration.roleAggregationStrategy",
 		Message: fmt.Sprintf("RoleAggregationStrategy cannot be set to Manual without enabling the %s feature gate", featuregate.OptOutRoleAggregation),
 	}}
+}
+
+func validateMigrationConfiguration(oldConfig, newConfig *v1.KubeVirtConfiguration) []metav1.StatusCause {
+	if newConfig.MigrationConfiguration == nil {
+		return nil
+	}
+
+	var causes []metav1.StatusCause
+	newMigrationConfig := newConfig.MigrationConfiguration
+
+	if newMigrationConfig.MaxDowntimeMs != nil {
+		var oldMaxDowntimeMs *uint64
+		if oldConfig.MigrationConfiguration != nil {
+			oldMaxDowntimeMs = oldConfig.MigrationConfiguration.MaxDowntimeMs
+		}
+		if !equality.Semantic.DeepEqual(oldMaxDowntimeMs, newMigrationConfig.MaxDowntimeMs) &&
+			!hasFeatureGateEnabled(newConfig, featuregate.MigrationStallDetection) {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Field:   "spec.configuration.migrationConfiguration.maxDowntimeMs",
+				Message: fmt.Sprintf("maxDowntimeMs cannot be modified without enabling the %s feature gate", featuregate.MigrationStallDetection),
+			})
+		}
+	}
+
+	return causes
 }

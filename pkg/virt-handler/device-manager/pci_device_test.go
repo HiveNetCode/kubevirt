@@ -22,6 +22,7 @@ package device_manager
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -58,12 +59,16 @@ var _ = Describe("PCI Device", func() {
 		By("making sure the environment has a PCI device at " + fakeAddress)
 		_, err := os.Stat("/sys/bus/pci/devices/" + fakeAddress)
 		if errors.Is(err, os.ErrNotExist) {
-			Skip("No PCI device found at " + fakeAddress + ", can't run PCI tests")
+			Skip("No PCI device found at " + fakeAddress + ", can't run PCI tests") //nolint:forbidigo
 		}
 
 		By("mocking PCI functions to simulate a vfio-pci device at " + fakeAddress)
 		mockPCI := NewMockDeviceHandler(gomock.NewController(GinkgoT()))
+		oldHandler := handler
 		handler = mockPCI
+		DeferCleanup(func() {
+			handler = oldHandler
+		})
 		// Force pre-defined returned values and ensure the function only get called exacly once each on 0000:00:00.0
 		mockPCI.EXPECT().GetDeviceIOMMUGroup(pciBasePath, fakeAddress).Return(fakeIommuGroup, nil).Times(1)
 		mockPCI.EXPECT().GetDeviceDriver(pciBasePath, fakeAddress).Return(fakeDriver, nil).Times(1)
@@ -167,9 +172,9 @@ pciHostDevices:
 		enabledDevicePlugins, disabledDevicePlugins := deviceController.splitPermittedDevices(
 			deviceController.updatePermittedHostDevicePlugins(),
 		)
-		Expect(enabledDevicePlugins).To(HaveLen(1), "a device plugin wasn't created for the fake device")
-		Expect(disabledDevicePlugins).To(BeEmpty(), "no disabled device plugins are expected")
-		Ω(enabledDevicePlugins).Should(HaveKey(fakeName))
+		// SEV plugin is on-by-default at Beta, so assert on our fake device, not the whole set.
+		Expect(enabledDevicePlugins).To(HaveKey(fakeName), "a device plugin wasn't created for the fake device")
+		Expect(disabledDevicePlugins).ToNot(HaveKey(fakeName), "the fake device plugin should not be disabled")
 		// Manually adding the enabled plugin, since the device controller is not actually running
 		deviceController.startedPlugins[fakeName] = controlledDevice{devicePlugin: enabledDevicePlugins[fakeName]}
 
@@ -184,8 +189,92 @@ pciHostDevices:
 		enabledDevicePlugins, disabledDevicePlugins = deviceController.splitPermittedDevices(
 			deviceController.updatePermittedHostDevicePlugins(),
 		)
-		Expect(enabledDevicePlugins).To(BeEmpty(), "no enabled device plugins should be found")
-		Expect(disabledDevicePlugins).To(HaveLen(1), "the fake device plugin did not get disabled")
-		Ω(disabledDevicePlugins).Should(HaveKey(fakeName))
+		Expect(enabledDevicePlugins).ToNot(HaveKey(fakeName), "the fake device plugin should no longer be enabled")
+		Expect(disabledDevicePlugins).To(HaveKey(fakeName), "the fake device plugin did not get disabled")
+	})
+})
+
+var _ = Describe("Physical Function Detection", func() {
+	var tmpSysDir string
+
+	BeforeEach(func() {
+		tmpSysDir = GinkgoT().TempDir()
+	})
+
+	Context("When checking SR-IOV Physical Functions", func() {
+		It("Should identify a PF by sriov_totalvfs file", func() {
+			pciAddress := "0009:01:00.0"
+			pfDir := filepath.Join(tmpSysDir, pciAddress)
+			err := os.Mkdir(pfDir, 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			f, err := os.Create(filepath.Join(pfDir, "sriov_totalvfs"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(f.Close()).ToNot(HaveOccurred())
+
+			Expect(handler.IsPhysicalFunction(tmpSysDir, pciAddress)).To(BeTrue())
+		})
+
+		It("Should not identify a VF as a PF", func() {
+			pciAddress := "0009:01:00.1"
+			vfDir := filepath.Join(tmpSysDir, pciAddress)
+			err := os.Mkdir(vfDir, 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(handler.IsPhysicalFunction(tmpSysDir, pciAddress)).To(BeFalse())
+		})
+
+		It("Should handle non-existent directories gracefully", func() {
+			Expect(handler.IsPhysicalFunction(tmpSysDir, "0009:01:00.1")).To(BeFalse())
+		})
+	})
+})
+
+var _ = Describe("vGPU Profile Detection", func() {
+	var tmpSysDir string
+
+	BeforeEach(func() {
+		tmpSysDir = GinkgoT().TempDir()
+	})
+
+	Context("When checking for vGPU profiles", func() {
+		It("Should identify a device with vGPU profile assigned", func() {
+			pciAddress := "0009:01:00.1"
+			vfDir := filepath.Join(tmpSysDir, pciAddress)
+			deviceDir := filepath.Join(vfDir, "nvidia")
+			err := os.MkdirAll(deviceDir, 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Create current_vgpu_type file with non-zero value (profile assigned)
+			vgpuTypeFile := filepath.Join(deviceDir, "current_vgpu_type")
+			err = os.WriteFile(vgpuTypeFile, []byte("256\n"), 0644)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(handler.HasVGPUProfile(tmpSysDir, pciAddress)).To(BeTrue())
+		})
+
+		It("Should not identify a device without vGPU profile", func() {
+			pciAddress := "0009:01:00.1"
+			vfDir := filepath.Join(tmpSysDir, pciAddress)
+			err := os.Mkdir(vfDir, 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(handler.HasVGPUProfile(tmpSysDir, pciAddress)).To(BeFalse())
+		})
+
+		It("Should handle device with zero vGPU type (no profile assigned)", func() {
+			pciAddress := "0009:01:00.1"
+			vfDir := filepath.Join(tmpSysDir, pciAddress)
+			deviceDir := filepath.Join(vfDir, "nvidia")
+			err := os.MkdirAll(deviceDir, 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Create current_vgpu_type file with zero value (no profile assigned)
+			vgpuTypeFile := filepath.Join(deviceDir, "current_vgpu_type")
+			err = os.WriteFile(vgpuTypeFile, []byte("0\n"), 0644)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(handler.HasVGPUProfile(tmpSysDir, pciAddress)).To(BeFalse())
+		})
 	})
 })

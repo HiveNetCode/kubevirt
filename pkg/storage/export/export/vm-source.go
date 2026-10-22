@@ -28,7 +28,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/controller"
@@ -69,6 +69,10 @@ func (s *VMSource) ServicePorts() []corev1.ServicePort {
 }
 
 func (s *VMSource) ConfigurePod(pod *corev1.Pod) {
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "EXPORT_VM_DEF_URI",
+		Value: manifestsPath,
+	})
 	s.sourceVolumes.configurePodVolumes(pod)
 }
 
