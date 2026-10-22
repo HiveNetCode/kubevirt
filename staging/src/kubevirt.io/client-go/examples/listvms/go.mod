@@ -1,6 +1,6 @@
 module kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/examples/listvms
 
-go 1.12
+go 1.26.0
 
 replace k8s.io/apimachinery => k8s.io/apimachinery v0.0.0-20190221213512-86fb29eff628
 
