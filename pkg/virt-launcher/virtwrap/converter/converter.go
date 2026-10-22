@@ -1028,6 +1028,7 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		compute.NewConsoleDomainConfigurator(c.SerialConsoleLog),
 		compute.PanicDevicesDomainConfigurator{},
 		compute.NewHypervisorFeaturesDomainConfigurator(c.Architecture.HasVMPort(), c.UseLaunchSecurityTDX),
+		compute.NewVIOMMUDomainConfigurator(),
 		compute.NewSysInfoDomainConfigurator(convertCmdv1SMBIOSToComputeSMBIOS(c.SMBios)),
 		compute.NewOSDomainConfigurator(c.Architecture.IsSMBiosNeeded(), convertEFIConfiguration(c.EFIConfiguration)),
 		storage.NewVirtiofsConfigurator(),

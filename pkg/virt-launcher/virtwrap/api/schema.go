@@ -355,6 +355,13 @@ type Features struct {
 	PVSpinlock *FeaturePVSpinlock `xml:"pvspinlock,omitempty"`
 	PMU        *FeatureState      `xml:"pmu,omitempty"`
 	VMPort     *FeatureState      `xml:"vmport,omitempty"`
+	Ioapic     *FeatureIoapic     `xml:"ioapic,omitempty"`
+}
+
+// FeatureIoapic selects the IOAPIC implementation. Driver "qemu" requests the
+// userspace IOAPIC, which libvirt translates to -machine kernel_irqchip=split.
+type FeatureIoapic struct {
+	Driver string `xml:"driver,attr,omitempty"`
 }
 
 const HypervModePassthrough = "passthrough"
@@ -830,6 +837,12 @@ type IOMMUDriver struct {
 	RIL      string `xml:"ril,attr,omitempty"`
 	SSIDSize string `xml:"ssidSize,attr,omitempty"`
 	OAS      string `xml:"oas,attr,omitempty"`
+	// x86 intel-iommu attributes (model='intel'). CachingMode "on" is
+	// required for VFIO device assignment: QEMU refuses to boot a VFIO
+	// device behind an intel-iommu that lacks it.
+	Intremap    string `xml:"intremap,attr,omitempty"`
+	CachingMode string `xml:"caching_mode,attr,omitempty"`
+	Eim         string `xml:"eim,attr,omitempty"`
 }
 
 // END IOMMU -----------------------------
