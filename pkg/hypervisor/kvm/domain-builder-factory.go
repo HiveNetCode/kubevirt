@@ -93,6 +93,7 @@ func MakeDomainBuilder(vmi *v1.VirtualMachineInstance, c *convertertypes.Convert
 		compute.NewConsoleDomainConfigurator(c.SerialConsoleLog),
 		compute.PanicDevicesDomainConfigurator{},
 		compute.NewHypervisorFeaturesDomainConfigurator(c.Architecture.HasVMPort(), c.UseLaunchSecurityTDX),
+		compute.NewVIOMMUDomainConfigurator(),
 		compute.NewSysInfoDomainConfigurator(common.ConvertCmdv1SMBIOSToComputeSMBIOS(c.SMBios)),
 		compute.NewOSDomainConfigurator(c.Architecture.IsSMBiosNeeded(), common.ConvertEFIConfiguration(c.EFIConfiguration)),
 		storage.NewVirtiofsConfigurator(),

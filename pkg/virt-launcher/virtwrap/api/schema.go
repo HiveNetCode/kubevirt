@@ -334,6 +334,13 @@ type Features struct {
 	PVSpinlock *FeaturePVSpinlock `xml:"pvspinlock,omitempty"`
 	PMU        *FeatureState      `xml:"pmu,omitempty"`
 	VMPort     *FeatureState      `xml:"vmport,omitempty"`
+	Ioapic     *FeatureIoapic     `xml:"ioapic,omitempty"`
+}
+
+// FeatureIoapic selects the IOAPIC implementation. Driver "qemu" requests the
+// userspace IOAPIC, which libvirt translates to -machine kernel_irqchip=split.
+type FeatureIoapic struct {
+	Driver string `xml:"driver,attr,omitempty"`
 }
 
 const HypervModePassthrough = "passthrough"
@@ -624,6 +631,7 @@ type Devices struct {
 	Interfaces   []Interface        `xml:"interface"`
 	Channels     []Channel          `xml:"channel"`
 	HostDevices  []HostDevice       `xml:"hostdev,omitempty"`
+	IOMMU        *IOMMU             `xml:"iommu,omitempty"`
 	PanicDevices []PanicDevice      `xml:"panic,omitempty"`
 	Controllers  []Controller       `xml:"controller,omitempty"`
 	Video        []Video            `xml:"video"`
@@ -641,6 +649,22 @@ type Devices struct {
 	TPMs         []TPM              `xml:"tpm,omitempty"`
 	VSOCK        *VSOCK             `xml:"vsock,omitempty"`
 	Memory       *MemoryDevice      `xml:"memory,omitempty"`
+}
+
+// IOMMU describes a virtual IOMMU device (vIOMMU) exposed to the guest.
+type IOMMU struct {
+	Model  string       `xml:"model,attr"`
+	Driver *IOMMUDriver `xml:"driver,omitempty"`
+}
+
+// IOMMUDriver holds the vIOMMU driver attributes understood by libvirt
+// (intremap/caching_mode/eim tristates). CachingMode "on" is required for
+// VFIO device assignment: QEMU refuses to boot a VFIO device behind an
+// intel-iommu that lacks it.
+type IOMMUDriver struct {
+	Intremap    string `xml:"intremap,attr,omitempty"`
+	CachingMode string `xml:"caching_mode,attr,omitempty"`
+	Eim         string `xml:"eim,attr,omitempty"`
 }
 
 type PanicDevice struct {
