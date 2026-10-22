@@ -7,8 +7,11 @@ cmd/virtctl
 cmd/virt-exportserver
 cmd/virt-operator
 pkg/controller/testing
+pkg/dra
+pkg/downwardmetrics/scraper
 pkg/instancetype
 pkg/libvmi
+pkg/monitoring/metrics
 pkg/monitoring/rules
 pkg/network/admitter
 pkg/network/controllers
@@ -29,9 +32,11 @@ pkg/network/netns
 pkg/network/passt
 pkg/network/pod/annotations
 pkg/network/resources
+pkg/network/setup/launcher
 pkg/network/vmispec
 pkg/network/vmliveupdate
 pkg/pointer
+pkg/storage/oci
 pkg/storage/pod/annotations
 pkg/storage/reservation
 pkg/storage/velero
@@ -67,6 +72,7 @@ pkg/virt-launcher/virtwrap/converter/storage
 pkg/virt-launcher/virtwrap/converter/virtio
 pkg/virt-launcher/virtwrap/network
 pkg/virt-launcher/virtwrap/statsconv/util
+pkg/vmitrait
 tests/conformance
 tests/console
 tests/decorators
@@ -76,10 +82,12 @@ tests/framework/kubevirt
 tests/framework/matcher/helper
 tests/infrastructure
 tests/instancetype
+tests/launchsecurity
 tests/libconfigmap
 tests/libdomain
 tests/libinstancetype
 tests/libkubevirt
+tests/libmonitoring
 tests/libnamespace
 tests/libnet
 tests/libnode
@@ -90,6 +98,7 @@ tests/libssh
 tests/libvmifact
 tests/libvmops
 tests/libwait
+tests/monitoring
 tests/network
 tests/numa
 tests/usb

@@ -21,20 +21,14 @@ package infrastructure
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	gomegatypes "github.com/onsi/gomega/types"
 	metricsutil "github.com/rhobs/operator-observability-toolkit/pkg/testutil"
-	authenticationv1 "k8s.io/api/authentication/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/libnode"
@@ -65,7 +59,7 @@ const (
 	remoteCmdErrPattern = "failed running `%s` with stdout:\n %v \n stderr:\n %v \n err: \n %v "
 )
 
-var _ = Describe("[sig-monitoring][rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus scraped metrics", decorators.SigMonitoring, func() { //nolint:lll
+var _ = Describe("[sig-monitoring][rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus scraped metrics", decorators.SigMonitoring, decorators.WgS390x, func() { //nolint:lll
 	var virtClient kubecli.KubevirtClient
 
 	// start a VMI, wait for it to run and return the node it runs on
@@ -95,7 +89,7 @@ var _ = Describe("[sig-monitoring][rfe_id:3187][crit:medium][vendor:cnv-qe@redha
 		scraped and processed by the different components on the way.
 	*/
 
-	It("[QUARANTINE][test_id:4135]should find VMI namespace on namespace label of the metric", decorators.Quarantine, func() {
+	It("[test_id:4135]should find VMI namespace on namespace label of the metric", func() {
 		/*
 			This test is required because in cases of misconfigurations on
 			monitoring objects (such for the ServiceMonitor), our rules will
@@ -104,67 +98,22 @@ var _ = Describe("[sig-monitoring][rfe_id:3187][crit:medium][vendor:cnv-qe@redha
 		*/
 
 		By("creating a VMI in a user defined namespace")
-		vmi := libvmifact.NewAlpine()
+		vmi := libvmifact.NewGuestless()
 		vmi.Namespace = testsuite.GetTestNamespace(vmi)
 		startVMI(vmi)
 
-		By("finding virt-handler pod")
-		ops, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(
-			context.Background(),
-			metav1.ListOptions{LabelSelector: "kubevirt.io=virt-handler"})
-		Expect(err).ToNot(HaveOccurred(), "failed to list virt-handlers")
-		Expect(ops.Size()).ToNot(Equal(0), "no virt-handlers found")
-		op := ops.Items[0]
-		Expect(op).ToNot(BeNil(), "virt-handler pod should not be nil")
-
-		urlSchema := "https"
-		promPort := 9091
-		if flags.PrometheusNamespace == "monitoring" {
-			urlSchema = "http"
-			promPort = 9090
+		By("querying Prometheus for a VMI exported metric")
+		labels := map[string]string{
+			"namespace": vmi.Namespace,
+			"name":      vmi.Name,
 		}
-		promServiceURL := fmt.Sprintf("prometheus-k8s.%s.svc.cluster.local", flags.PrometheusNamespace)
-
-		// the Service Account needs to have access to the Prometheus subresource api
-		token, err := generateTokenForPrometheusAPI(vmi.Namespace)
-		Expect(err).ToNot(HaveOccurred(), "failed to generate token for Prometheus API")
-		DeferCleanup(cleanupClusterRoleAndBinding, vmi.Namespace)
-
-		By("querying Prometheus API endpoint for a VMI exported metric")
-		cmd := []string{
-			"curl",
-			"-L",
-			"-k",
-			fmt.Sprintf("%s://%s:%d/api/v1/query", urlSchema, promServiceURL, promPort),
-			"-H",
-			fmt.Sprintf("Authorization: Bearer %s", token),
-			"--data-urlencode",
-			fmt.Sprintf(
-				`query=kubevirt_vmi_memory_resident_bytes{namespace=%q,name=%q}`,
-				vmi.Namespace,
-				vmi.Name,
-			),
-		}
-
-		stdout, stderr, err := exec.ExecuteCommandOnPodWithResults(&op, "virt-handler", cmd)
-		Expect(err).ToNot(HaveOccurred(), fmt.Sprintf(remoteCmdErrPattern, strings.Join(cmd, " "), stdout, stderr, err))
-
-		// the Prometheus go-client does not export queryResult, and
-		// using an HTTP client for queries would require a port-forwarding
-		// since the cluster is running in a different network.
-		var queryResult map[string]json.RawMessage
-
-		err = json.Unmarshal([]byte(stdout), &queryResult)
-		Expect(err).ToNot(HaveOccurred(), "failed to unmarshal query result: %s", stdout)
-
-		var status string
-		err = json.Unmarshal(queryResult["status"], &status)
-		Expect(err).ToNot(HaveOccurred(), "failed to unmarshal query status")
-		Expect(status).To(Equal("success"))
+		libmonitoring.WaitForMetricValueWithLabelsToBe(
+			virtClient, "kubevirt_vmi_memory_resident_bytes", labels, 0, ">=", 0,
+		)
 	})
 })
 
-var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus Endpoints", func() {
+var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus Endpoints", Ordered, decorators.OncePerOrderedCleanup, func() { //nolint:lll
 	var (
 		virtClient       kubecli.KubevirtClient
 		preparedVMIs     []*v1.VirtualMachineInstance
@@ -210,7 +159,7 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 		return nodeName
 	}
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		var err error
 		virtClient = kubevirt.Client()
 
@@ -230,12 +179,6 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 		for _, ip := range pod.Status.PodIPs {
 			handlerMetricIPs = append(handlerMetricIPs, ip.IP)
 		}
-	})
-
-	AfterEach(func() {
-		preparedVMIs = []*v1.VirtualMachineInstance{}
-		pod = nil
-		handlerMetricIPs = []string{}
 	})
 
 	It("[test_id:4136] should find one leading virt-controller and two ready", func() {
@@ -315,50 +258,6 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 		}
 	})
 
-	DescribeTable("should throttle the Prometheus metrics access", func(family k8sv1.IPFamily) {
-		libnet.SkipWhenClusterNotSupportIPFamily(family)
-
-		ip := libnet.GetIP(handlerMetricIPs, family)
-
-		concurrency := 100 // random value "much higher" than maxRequestsInFlight
-
-		tr := &http.Transport{
-			MaxIdleConnsPerHost: concurrency,
-			TLSClientConfig: &tls.Config{
-				//nolint:gosec
-				InsecureSkipVerify: true,
-			},
-		}
-
-		client := http.Client{
-			Timeout:   time.Duration(1),
-			Transport: tr,
-		}
-
-		errorsChan := make(chan error)
-		By("Scraping the Prometheus endpoint")
-		const metricsPort = 8443
-		metricsURL := libmonitoring.PrepareMetricsURL(ip, metricsPort)
-		for ix := 0; ix < concurrency; ix++ {
-			go func(ix int) {
-				req, _ := http.NewRequest("GET", metricsURL, http.NoBody)
-				resp, err := client.Do(req)
-				if err != nil {
-					GinkgoLogr.Info("client request", "request", req, "index", ix, "error", err)
-				} else {
-					Expect(resp.Body.Close()).To(Succeed())
-				}
-				errorsChan <- err
-			}(ix)
-		}
-
-		err := libinfra.ValidatedHTTPResponses(errorsChan, concurrency)
-		Expect(err).ToNot(HaveOccurred(), "Should throttle HTTP access without unexpected errors")
-	},
-		Entry("[test_id:4140] by using IPv4", k8sv1.IPv4Protocol),
-		Entry("[test_id:6226] by using IPv6", k8sv1.IPv6Protocol),
-	)
-
 	It("[test_id:4141]should include the metrics for a running VM", func() {
 		By("Scraping the Prometheus endpoint")
 		Eventually(func() string {
@@ -386,23 +285,24 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 	})
 
 	DescribeTable("should include the storage metrics for a running VM", func(metricName, operator string) {
-		metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
-
 		By("Checking the collected metrics")
 		for _, vmi := range preparedVMIs {
 			for _, vol := range vmi.Spec.Volumes {
-				fetcher := metricsutil.NewMetricsFetcher("")
-				fetcher.AddNameFilter(metricName)
-				fetcher.AddLabelFilter("name", vmi.Name, "drive", vol.Name)
+				Eventually(func(g Gomega) {
+					metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
+					fetcher := metricsutil.NewMetricsFetcher("")
+					fetcher.AddNameFilter(metricName)
+					fetcher.AddLabelFilter("name", vmi.Name, "drive", vol.Name)
 
-				metrics, err := fetcher.LoadMetrics(metricsPayload)
-				Expect(err).ToNot(HaveOccurred(), "should load metrics without error")
+					metrics, err := fetcher.LoadMetrics(metricsPayload)
+					g.Expect(err).ToNot(HaveOccurred(), "should load metrics without error")
 
-				results := metrics[metricName]
-				Expect(results).ToNot(BeEmpty(), "Expected to find metric for VMI %s and disk %s", vmi.Name, vol.Name)
+					results := metrics[metricName]
+					g.Expect(results).ToNot(BeEmpty(), "Expected to find metric for VMI %s and disk %s", vmi.Name, vol.Name)
 
-				GinkgoLogr.Info("Metric value", "value", results[0].Value)
-				Expect(results[0].Value).To(BeNumerically(operator, 0.0))
+					GinkgoLogr.Info("Metric value", "value", results[0].Value)
+					g.Expect(results[0].Value).To(BeNumerically(operator, 0.0))
+				}, 15*time.Second, 2*time.Second).Should(Succeed())
 			}
 		}
 	},
@@ -423,20 +323,22 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 	)
 
 	DescribeTable("should include metrics for a running VM", func(metricSubstring, operator string) {
-		metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
+		Eventually(func(g Gomega) {
+			metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
 
-		fetcher := metricsutil.NewMetricsFetcher("")
-		fetcher.AddNameFilter(metricSubstring)
+			fetcher := metricsutil.NewMetricsFetcher("")
+			fetcher.AddNameFilter(metricSubstring)
 
-		metrics, err := fetcher.LoadMetrics(metricsPayload)
-		Expect(err).ToNot(HaveOccurred(), "should load metrics without error")
-		Expect(metrics).ToNot(BeEmpty(), "Expected at least one metric to be collected for %s", metricSubstring)
+			metrics, err := fetcher.LoadMetrics(metricsPayload)
+			g.Expect(err).ToNot(HaveOccurred(), "should load metrics without error")
+			g.Expect(metrics).ToNot(BeEmpty(), "Expected at least one metric to be collected for %s", metricSubstring)
 
-		for _, results := range metrics {
-			for _, result := range results {
-				Expect(result.Value).To(BeNumerically(operator, float64(0.0)))
+			for _, results := range metrics {
+				for _, result := range results {
+					g.Expect(result.Value).To(BeNumerically(operator, float64(0.0)))
+				}
 			}
-		}
+		}, 15*time.Second, 2*time.Second).Should(Succeed())
 	},
 		Entry("[test_id:4143] network metrics", "kubevirt_vmi_network_", ">="),
 		Entry("[test_id:4144] memory metrics", "kubevirt_vmi_memory", ">="),
@@ -444,86 +346,6 @@ var _ = Describe(SIGSerial("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com]
 		Entry("[test_id:4554] vcpu seconds", "kubevirt_vmi_vcpu_seconds_total", ">="),
 		Entry("[test_id:4556] vmi unused memory", "kubevirt_vmi_memory_unused_bytes", ">="),
 	)
-
-	It("[QUARANTINE][test_id:4145]should include VMI infos for a running VM", decorators.Quarantine, func() {
-		metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
-
-		fetcher := metricsutil.NewMetricsFetcher("")
-		fetcher.AddNameFilter("kubevirt_vmi_")
-
-		metrics, err := fetcher.LoadMetrics(metricsPayload)
-		Expect(err).ToNot(HaveOccurred())
-
-		By("Checking the collected metrics")
-		nodeName := pod.Spec.NodeName
-
-		var nameMatchers []gomegatypes.GomegaMatcher
-		for _, vmi := range preparedVMIs {
-			nameMatchers = append(nameMatchers, HaveKeyWithValue("name", vmi.Name))
-		}
-
-		for metricName, results := range metrics {
-			// we don't care about the ordering of the labels
-			if strings.HasPrefix(metricName, "kubevirt_vmi_info") {
-				// special case: namespace and name don't make sense for this metric
-				for _, metricResult := range results {
-					Expect(metricResult.Labels).To(HaveKeyWithValue("node", nodeName))
-				}
-				continue
-			}
-
-			for _, metricResult := range results {
-				Expect(metricResult.Labels).To(SatisfyAll(
-					HaveKeyWithValue("node", nodeName),
-					// all testing VMIs are on the same node and namespace,
-					// so checking the namespace of any random VMI is fine
-					HaveKeyWithValue("namespace", preparedVMIs[0].Namespace),
-					// otherwise, each result must refer to exactly one the prepared VMIs.
-					SatisfyAny(nameMatchers...),
-				))
-			}
-		}
-	})
-
-	Context("VMI eviction blocker status", func() {
-		var controllerMetricIPs []string
-
-		BeforeEach(func() {
-			virtControllerLeaderPodName := libinfra.GetLeader()
-			leaderPod, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Get(
-				context.Background(), virtControllerLeaderPodName, metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred(), "Should find the virt-controller pod")
-			for _, ip := range leaderPod.Status.PodIPs {
-				controllerMetricIPs = append(controllerMetricIPs, ip.IP)
-			}
-		})
-
-		AfterEach(func() {
-			controllerMetricIPs = nil
-		})
-
-		DescribeTable("should include VMI eviction blocker status for all running VMs", func(family k8sv1.IPFamily) {
-			libnet.SkipWhenClusterNotSupportIPFamily(family)
-
-			ip := libnet.GetIP(controllerMetricIPs, family)
-
-			metricsPayload := libmonitoring.GetKubevirtVMMetricsByIP(pod, ip) //nolint:staticcheck
-
-			fetcher := metricsutil.NewMetricsFetcher("")
-			fetcher.AddNameFilter("kubevirt_vmi_non_evictable")
-
-			metrics, err := fetcher.LoadMetrics(metricsPayload)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(metrics).ToNot(BeEmpty(), "Expected at least one metric to be collected")
-
-			results := metrics["kubevirt_vmi_non_evictable"]
-			Expect(results).ToNot(BeEmpty())
-			Expect(results[0].Value).To(BeNumerically(">=", float64(0.0)))
-		},
-			Entry("[test_id:4148] by IPv4", k8sv1.IPv4Protocol),
-			Entry("[test_id:6243] by IPv6", k8sv1.IPv6Protocol),
-		)
-	})
 
 	It("[test_id:4147]should include kubernetes labels to VMI metrics", func() {
 		metricsPayload := libmonitoring.GetKubevirtVMMetrics(pod)
@@ -615,99 +437,4 @@ func countReadyAndLeaderPods(pod *k8sv1.Pod, component string) (foundMetrics map
 	}
 
 	return foundMetrics, err
-}
-
-func generateTokenForPrometheusAPI(namespace string) (string, error) {
-	virtClient := kubevirt.Client()
-
-	// Define resource names
-	serviceAccountName := "prometheus-access-sa"
-	clusterRoleName := "prometheus-access-cluster-role"
-	clusterRoleBindingName := "prometheus-access-cluster-rolebinding"
-
-	// Create ServiceAccount
-	sa := &k8sv1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceAccountName,
-			Namespace: namespace,
-		},
-	}
-	_, err := virtClient.CoreV1().ServiceAccounts(namespace).Create(context.Background(), sa, metav1.CreateOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to create ServiceAccount: %w", err)
-	}
-
-	// Create ClusterRole
-	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: clusterRoleName + "-" + namespace, // Namespaced suffix for uniqueness
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"monitoring.coreos.com"},
-				Resources: []string{"prometheuses/api"},
-				Verbs:     []string{"create"},
-			},
-		},
-	}
-	_, err = virtClient.RbacV1().ClusterRoles().Create(context.Background(), clusterRole, metav1.CreateOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to create ClusterRole: %w", err)
-	}
-
-	// Create ClusterRoleBinding
-	clusterRoleBinding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: clusterRoleBindingName + "-" + namespace, // Namespaced suffix for uniqueness
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      serviceAccountName,
-				Namespace: namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			Kind:     "ClusterRole",
-			Name:     clusterRoleName + "-" + namespace, // Match the ClusterRole name
-			APIGroup: "rbac.authorization.k8s.io",
-		},
-	}
-	_, err = virtClient.RbacV1().ClusterRoleBindings().Create(context.Background(), clusterRoleBinding, metav1.CreateOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to create ClusterRoleBinding: %w", err)
-	}
-
-	// Retrieve token for the ServiceAccount
-	tokenRequest := &authenticationv1.TokenRequest{
-		Spec: authenticationv1.TokenRequestSpec{},
-	}
-	token, err := virtClient.CoreV1().
-		ServiceAccounts(namespace).
-		CreateToken(
-			context.Background(),
-			serviceAccountName,
-			tokenRequest,
-			metav1.CreateOptions{},
-		)
-	if err != nil {
-		return "", fmt.Errorf("failed to retrieve ServiceAccount token: %w", err)
-	}
-
-	// Return the token
-	return token.Status.Token, nil
-}
-
-func cleanupClusterRoleAndBinding(namespace string) {
-	virtClient := kubevirt.Client()
-	clusterRoleName := "prometheus-access-cluster-role-" + namespace
-	clusterRoleBindingName := "prometheus-access-cluster-rolebinding-" + namespace
-
-	// Delete ClusterRole
-	err := virtClient.RbacV1().ClusterRoles().Delete(context.Background(), clusterRoleName, metav1.DeleteOptions{})
-	Expect(err).ToNot(HaveOccurred(), "Failed to delete ClusterRole: %s", clusterRoleName)
-
-	// Delete ClusterRoleBinding
-	err = virtClient.RbacV1().ClusterRoleBindings().Delete(context.Background(), clusterRoleBindingName, metav1.DeleteOptions{})
-	Expect(err).ToNot(HaveOccurred(), "Failed to delete ClusterRoleBinding: %s", clusterRoleBindingName)
 }

@@ -12,7 +12,7 @@ fi
 
 fail_if_cri_bin_missing
 
-kubevirt_builder_version="2602201229-4494d1587"
+kubevirt_builder_version="2606231619-4fe2cd536f"
 kubevirt_cs10_builder_version=${KUBEVIRT_CS10_BUILDER_VERSION:-""}
 
 # CentOS Stream 9 builder images (default)
@@ -66,7 +66,7 @@ SYNC_VENDOR=${SYNC_VENDOR:-false}
 
 TEMPFILE=".rsynctemp"
 
-CONTAINER_ENV="--env HTTP_PROXY=${HTTP_PROXY} --env HTTPS_PROXY=${HTTP_PROXY} --env NO_PROXY=${NO_PROXY} --env KUBEVIRT_NO_BAZEL=${KUBEVIRT_NO_BAZEL} --env KUBEVIRT_CENTOS_STREAM_VERSION=${KUBEVIRT_CENTOS_STREAM_VERSION}"
+CONTAINER_ENV="--env HTTP_PROXY=${HTTP_PROXY} --env HTTPS_PROXY=${HTTP_PROXY} --env NO_PROXY=${NO_PROXY} --env KUBEVIRT_NO_BAZEL=${KUBEVIRT_NO_BAZEL} --env KUBEVIRT_CENTOS_STREAM_VERSION=${KUBEVIRT_CENTOS_STREAM_VERSION} --env GOMAXPROCS=${GOMAXPROCS}"
 
 # Create the persistent container volume
 if [ -z "$($KUBEVIRT_CRI volume list | grep ${BUILDER})" ]; then

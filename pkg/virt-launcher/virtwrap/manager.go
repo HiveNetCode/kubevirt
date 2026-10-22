@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,6 +49,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/dra"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/pci"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 
 	"libvirt.org/go/libvirt"
@@ -75,13 +77,14 @@ import (
 	"kubevirt.io/kubevirt/pkg/liveupdate/memory"
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	netsriov "kubevirt.io/kubevirt/pkg/network/deviceinfo"
-	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
+	netsetup "kubevirt.io/kubevirt/pkg/network/setup/launcher"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	osdisk "kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
+	"kubevirt.io/kubevirt/pkg/storage/volumepath"
 	"kubevirt.io/kubevirt/pkg/unsafepath"
 	kutil "kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
@@ -124,9 +127,38 @@ const (
 	hotplugLargeMemoryMinRequiredFreePorts = 6
 	hotplugDefaultTotalPorts               = 8
 	hotplugMinRequiredFreePorts            = 3
+
+	twentySeconds = 20 * time.Second
+	oneMinute     = 1 * time.Minute
+	fiveMinutes   = 5 * time.Minute
+	thirtyMinutes = 30 * time.Minute
 )
 
 const maxConcurrentHotplugHostDevices = 1
+
+var agentDataCommandTTLs = map[string]time.Duration{
+	// 20sec
+	"guest-get-load":      twentySeconds,
+	"guest-get-cpustats":  twentySeconds,
+	"guest-get-diskstats": twentySeconds,
+
+	// 1min
+	"guest-get-time":              oneMinute,
+	"guest-get-vcpus":             oneMinute,
+	"guest-get-memory-block-info": oneMinute,
+	"guest-get-users":             oneMinute,
+
+	// 5min
+	"guest-get-osinfo":             fiveMinutes,
+	"guest-get-disks":              fiveMinutes,
+	"guest-get-host-name":          fiveMinutes,
+	"guest-get-timezone":           fiveMinutes,
+	"guest-network-get-route":      fiveMinutes,
+	"guest-network-get-interfaces": fiveMinutes,
+
+	// 30min
+	"guest-get-memory-blocks": thirtyMinutes,
+}
 
 type contextStore struct {
 	ctx    context.Context
@@ -149,7 +181,7 @@ type DomainManager interface {
 	MigrateVMI(*v1.VirtualMachineInstance, *cmdclient.MigrationOptions) error
 	PrepareMigrationTarget(*v1.VirtualMachineInstance, bool, *cmdv1.VirtualMachineOptions) error
 	GetDomainStats() (*stats.DomainStats, error)
-	CancelVMIMigration(*v1.VirtualMachineInstance) error
+	CancelVMIMigration(*v1.VirtualMachineInstance)
 	GetGuestInfo() v1.VirtualMachineInstanceGuestAgentInfo
 	GetUsers() []v1.VirtualMachineInstanceGuestOSUser
 	GetFilesystems() []v1.VirtualMachineInstanceFileSystem
@@ -170,6 +202,8 @@ type DomainManager interface {
 	UpdateGuestMemory(vmi *v1.VirtualMachineInstance) error
 	GetDomainDirtyRateStats(calculationDuration time.Duration) (*stats.DomainStatsDirtyRate, error)
 	GetScreenshot(vmi *v1.VirtualMachineInstance) (*cmdv1.ScreenshotResponse, error)
+	GetGuestAgentVersion() string
+	GetAgentData(dataKey string) (string, error)
 }
 
 type LibvirtDomainManager struct {
@@ -192,26 +226,42 @@ type LibvirtDomainManager struct {
 	cloudInitDataStore     *cloudinit.CloudInitData
 	setGuestTimeContextPtr *contextStore
 	efiEnvironment         *efi.EFIEnvironment
+	ovmfPath               string
 	ephemeralDiskCreator   ephemeraldisk.EphemeralDiskCreatorInterface
 	directIOChecker        converter.DirectIOChecker
 	disksInfo              map[string]*osdisk.DiskInfo
+	guestDiskSizes         map[string]int64
 	domainInfoStats        *stats.DomainJobInfo
 	diskMemoryLimitBytes   int64
 
 	metadataCache             *metadata.Cache
 	domainStatsCache          *virtcache.TimeDefinedCache[*stats.DomainStats]
 	domainDirtyRateStatsCache *virtcache.TimeDefinedCache[*stats.DomainStatsDirtyRate]
+	agentDataCaches           map[string]*virtcache.TimeDefinedCache[string]
+
+	// Device aliasas are updated only through hotplug events and SyncVMI
+	devAliasMap  map[string]string
+	devAliasLock sync.RWMutex
 
 	cpuSetGetter                       func() ([]int, error)
 	imageVolumeFeatureGateEnabled      bool
 	libvirtHooksServerAndClientEnabled bool
-	setTimeOnce                        sync.Once
+	firmwareAutoSelectionEnabled       bool
 
 	// Premigration hook server for VMI updates during migration
 	hookServer *premigrationhookserver.PreMigrationHookServer
 
 	hypervisorDeviceAvailable bool
 	hypervisorName            string
+	allowCrossArchEmulation   bool
+
+	guestAgentProbePaused atomic.Bool
+	abortWg               sync.WaitGroup
+
+	// iommuFD holds the IOMMUFD file descriptor received from the device plugin
+	// via SCM_RIGHTS. A value of -1 means no IOMMUFD FD is available.
+	// See: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainFDAssociate
+	iommuFD int
 }
 
 type pausedVMIs struct {
@@ -239,14 +289,14 @@ func (s pausedVMIs) contains(uid types.UID) bool {
 
 func NewLibvirtDomainManager(connection cli.Connection, virtShareDir, ephemeralDiskDir string, agentStore *agentpoller.AsyncAgentStore,
 	ovmfPath string, ephemeralDiskCreator ephemeraldisk.EphemeralDiskCreatorInterface, metadataCache *metadata.Cache,
-	stopChan chan struct{}, diskMemoryLimitBytes int64, cpuSetGetter func() ([]int, error), imageVolumeEnabled bool, libvirtHooksServerAndClientEnabled bool, hookServer *premigrationhookserver.PreMigrationHookServer, hypervisorName string) (DomainManager, error) {
+	stopChan chan struct{}, diskMemoryLimitBytes int64, cpuSetGetter func() ([]int, error), imageVolumeEnabled bool, libvirtHooksServerAndClientEnabled bool, hookServer *premigrationhookserver.PreMigrationHookServer, hypervisorName string, registerNBD storage.RegisterNBDFunc, domainName string, vmStatsCollectorEnabled bool, firmwareAutoSelectionEnabled bool, allowCrossArchEmulation bool) (DomainManager, error) {
 	directIOChecker := converter.NewDirectIOChecker()
-	return newLibvirtDomainManager(connection, virtShareDir, ephemeralDiskDir, agentStore, ovmfPath, ephemeralDiskCreator, directIOChecker, metadataCache, stopChan, diskMemoryLimitBytes, cpuSetGetter, imageVolumeEnabled, libvirtHooksServerAndClientEnabled, hookServer, hypervisorName)
+	return newLibvirtDomainManager(connection, virtShareDir, ephemeralDiskDir, agentStore, ovmfPath, ephemeralDiskCreator, directIOChecker, metadataCache, stopChan, diskMemoryLimitBytes, cpuSetGetter, imageVolumeEnabled, libvirtHooksServerAndClientEnabled, hookServer, hypervisorName, registerNBD, domainName, vmStatsCollectorEnabled, firmwareAutoSelectionEnabled, allowCrossArchEmulation)
 }
 
 func newLibvirtDomainManager(connection cli.Connection, virtShareDir, ephemeralDiskDir string, agentStore *agentpoller.AsyncAgentStore, ovmfPath string,
 	ephemeralDiskCreator ephemeraldisk.EphemeralDiskCreatorInterface, directIOChecker converter.DirectIOChecker, metadataCache *metadata.Cache,
-	stopChan chan struct{}, diskMemoryLimitBytes int64, cpuSetGetter func() ([]int, error), imageVolumeEnabled bool, libvirtHooksServerAndClientEnabled bool, hookServer *premigrationhookserver.PreMigrationHookServer, hypervisorName string) (DomainManager, error) {
+	stopChan chan struct{}, diskMemoryLimitBytes int64, cpuSetGetter func() ([]int, error), imageVolumeEnabled bool, libvirtHooksServerAndClientEnabled bool, hookServer *premigrationhookserver.PreMigrationHookServer, hypervisorName string, registerNBD storage.RegisterNBDFunc, domainName string, vmStatsCollectorEnabled bool, firmwareAutoSelectionEnabled bool, allowCrossArchEmulation bool) (DomainManager, error) {
 
 	// Check hypervisor device availability
 	hypervisorDevicePath := "/dev/" + hypervisor.NewLauncherHypervisorResources(hypervisorName).GetHypervisorDevice()
@@ -270,23 +320,27 @@ func newLibvirtDomainManager(connection cli.Connection, virtShareDir, ephemeralD
 
 		agentData:            agentStore,
 		efiEnvironment:       efi.DetectEFIEnvironment(runtime.GOARCH, ovmfPath),
+		ovmfPath:             ovmfPath,
 		ephemeralDiskCreator: ephemeralDiskCreator,
 		directIOChecker:      directIOChecker,
 		disksInfo:            map[string]*osdisk.DiskInfo{},
+		guestDiskSizes:       map[string]int64{},
 		domainInfoStats:      &stats.DomainJobInfo{},
 
 		metadataCache:                      metadataCache,
 		cpuSetGetter:                       cpuSetGetter,
-		setTimeOnce:                        sync.Once{},
 		imageVolumeFeatureGateEnabled:      imageVolumeEnabled,
 		libvirtHooksServerAndClientEnabled: libvirtHooksServerAndClientEnabled,
+		firmwareAutoSelectionEnabled:       firmwareAutoSelectionEnabled,
 		hookServer:                         hookServer,
 		hypervisorName:                     hypervisorName,
 		hypervisorDeviceAvailable:          hypervisorDeviceAvailable,
+		iommuFD:                            -1,
+		allowCrossArchEmulation:            allowCrossArchEmulation,
 	}
 
 	manager.hotplugHostDevicesInProgress = make(chan struct{}, maxConcurrentHotplugHostDevices)
-	manager.storageManager = storage.NewStorageManager(connection, metadataCache)
+	manager.storageManager = storage.NewStorageManager(connection, metadataCache, registerNBD)
 	manager.credManager = accesscredentials.NewManager(connection, &manager.domainModifyLock, metadataCache)
 
 	reCalcDomainStats := func() (*stats.DomainStats, error) {
@@ -296,7 +350,9 @@ func newLibvirtDomainManager(connection cli.Connection, virtShareDir, ephemeralD
 		}
 
 		if len(list) == 0 {
-			return nil, nil
+			// In case libvirt is not responsive we must return an error, otherwise a 'nil' '*stats.DomainStats'
+			// will be cached and returned until the cache timeout expires.
+			return nil, errors.New("empty DomainStats")
 		}
 
 		return list[0], nil
@@ -312,6 +368,20 @@ func newLibvirtDomainManager(connection cli.Connection, virtShareDir, ephemeralD
 		err := manager.domainStatsCache.KeepValueUpdated(stopChan)
 		if err != nil {
 			return nil, fmt.Errorf("failed to keep domain stats updated: %w", err)
+		}
+	}
+
+	if vmStatsCollectorEnabled {
+		manager.agentDataCaches = make(map[string]*virtcache.TimeDefinedCache[string], len(agentDataCommandTTLs))
+		for cmd, ttl := range agentDataCommandTTLs {
+			reCalcFunc := func() (string, error) {
+				return connection.QemuAgentCommand(`{"execute":"`+string(cmd)+`"}`, domainName)
+			}
+			cache, err := virtcache.NewTimeDefinedCache(ttl, true, reCalcFunc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create agent data cache for %s: %w", cmd, err)
+			}
+			manager.agentDataCaches[cmd] = cache
 		}
 	}
 
@@ -381,74 +451,72 @@ func (l *LibvirtDomainManager) setGuestTime(vmi *v1.VirtualMachineInstance) {
 	// It is not guaranteed that the time is actually set (it depends on guest
 	// environment, especially QEMU agent presence) or that the set time is
 	// very precise (NTP in the guest should take care of it if needed).
+	//
+	// Cancel any in-flight goroutine synchronously before spawning a new
+	// one, so the later caller always wins regardless of goroutine
+	// scheduling order.
+	ctx := l.getGuestTimeContext()
 
-	l.setTimeOnce.Do(func() {
-		go func() {
-			domName := api.VMINamespaceKeyFunc(vmi)
-			dom, err := l.virConn.LookupDomainByName(domName)
-			if err != nil {
-				log.Log.Object(vmi).Reason(err).Error(failedSyncGuestTime)
-				return
-			}
-			defer dom.Free()
-			// Syncing the guest time is a best-effort. Therefore
-			// don't flood the logs
-			var latestErr error
-			defer func() {
-				if latestErr != nil {
-					log.Log.Object(vmi).Warning(latestErr.Error())
-				}
-			}()
-
-			ctx := l.getGuestTimeContext()
-			timeout := time.After(60 * time.Second)
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-timeout:
-					log.Log.Object(vmi).Error(failedSyncGuestTime)
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					currTime := time.Now()
-					secs := currTime.Unix()
-					nsecs := uint(currTime.Nanosecond())
-					err := dom.SetTime(secs, nsecs, 0)
-					if err != nil {
-						libvirtError, ok := err.(libvirt.Error)
-						if !ok {
-							log.Log.Object(vmi).Reason(err).Warning(failedSyncGuestTime)
-							return
-						}
-
-						switch libvirtError.Code {
-						case libvirt.ERR_AGENT_UNRESPONSIVE:
-							const unresponsive = "failed to set time: QEMU agent unresponsive"
-							latestErr = fmt.Errorf("%s, %s", unresponsive, err)
-							log.Log.Object(vmi).Reason(err).V(9).Info(unresponsive)
-						case libvirt.ERR_OPERATION_UNSUPPORTED:
-							// no need to retry as this opertaion is not supported
-							log.Log.Object(vmi).Reason(err).Warning("failed to set time: not supported")
-							return
-						case libvirt.ERR_ARGUMENT_UNSUPPORTED:
-							// no need to retry as the agent is not configured
-							log.Log.Object(vmi).Reason(err).Warning("failed to set time: agent not configured")
-							return
-						default:
-							latestErr = fmt.Errorf("%s, %s", failedSyncGuestTime, err)
-							log.Log.Object(vmi).Reason(err).V(9).Info(failedSyncGuestTime)
-						}
-					} else {
-						latestErr = nil
-						log.Log.Object(vmi).Info("guest VM time sync finished successfully")
-						return
-					}
-				}
+	go func() {
+		domName := api.VMINamespaceKeyFunc(vmi)
+		dom, err := l.virConn.LookupDomainByName(domName)
+		if err != nil {
+			log.Log.Object(vmi).Reason(err).Error(failedSyncGuestTime)
+			return
+		}
+		defer dom.Free()
+		var latestErr error
+		defer func() {
+			if latestErr != nil {
+				log.Log.Object(vmi).Warning(latestErr.Error())
 			}
 		}()
-	})
+
+		timeout := time.After(60 * time.Second)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-timeout:
+				log.Log.Object(vmi).Error(failedSyncGuestTime)
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				currTime := time.Now()
+				secs := currTime.Unix()
+				nsecs := uint(currTime.Nanosecond())
+				err := dom.SetTime(secs, nsecs, 0)
+				if err != nil {
+					libvirtError, ok := err.(libvirt.Error)
+					if !ok {
+						log.Log.Object(vmi).Reason(err).Warning(failedSyncGuestTime)
+						return
+					}
+
+					switch libvirtError.Code {
+					case libvirt.ERR_AGENT_UNRESPONSIVE:
+						const unresponsive = "failed to set time: QEMU agent unresponsive"
+						latestErr = fmt.Errorf("%s, %s", unresponsive, err)
+						log.Log.Object(vmi).Reason(err).V(9).Info(unresponsive)
+					case libvirt.ERR_OPERATION_UNSUPPORTED:
+						log.Log.Object(vmi).Reason(err).Warning("failed to set time: not supported")
+						return
+					case libvirt.ERR_ARGUMENT_UNSUPPORTED:
+						log.Log.Object(vmi).Reason(err).Warning("failed to set time: agent not configured")
+						return
+					default:
+						latestErr = fmt.Errorf("%s, %s", failedSyncGuestTime, err)
+						log.Log.Object(vmi).Reason(err).V(9).Info(failedSyncGuestTime)
+					}
+				} else {
+					latestErr = nil
+					log.Log.Object(vmi).Info("guest VM time sync finished successfully")
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (l *LibvirtDomainManager) getGuestTimeContext() context.Context {
@@ -506,7 +574,6 @@ func (l *LibvirtDomainManager) UpdateVCPUs(vmi *v1.VirtualMachineInstance, optio
 
 	// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
 	if vmi.IsCPUDedicated() {
-		useIOThreads := false
 		if options != nil && options.Topology != nil {
 			topology = options.Topology
 		}
@@ -529,11 +596,7 @@ func (l *LibvirtDomainManager) UpdateVCPUs(vmi *v1.VirtualMachineInstance, optio
 
 		domain.Spec = *spec
 
-		if domain.Spec.CPUTune != nil && len(domain.Spec.CPUTune.IOThreadPin) > 0 {
-			useIOThreads = true
-		}
-
-		err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, topology, podCPUSet, useIOThreads)
+		err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, topology, podCPUSet)
 		if err != nil {
 			return fmt.Errorf("%s: %v", errMsgPrefix, err)
 		}
@@ -624,6 +687,7 @@ func (l *LibvirtDomainManager) hotPlugHostDevices(vmi *v1.VirtualMachineInstance
 		return fmt.Errorf("%s: %v", errMsgPrefix, hostdevice.AttachHostDevices(domain, sriovHostDevices))
 	}
 
+	l.refreshDeviceAliasMap(domain)
 	return nil
 }
 
@@ -632,13 +696,17 @@ func (l *LibvirtDomainManager) Exec(domainName, command string, args []string, t
 }
 
 func (l *LibvirtDomainManager) GuestPing(domainName string) error {
+	if l.guestAgentProbePaused.Load() {
+		log.Log.V(4).Infof("GuestPing for %s skipped: guest agent probe is paused via annotation", domainName)
+		return nil
+	}
 	pingCmd := `{"execute":"guest-ping"}`
 	_, err := l.virConn.QemuAgentCommand(pingCmd, domainName)
 	if err == nil {
 		return nil
 	}
 	if isGuestAgentUnavailableError(err) && (l.isLiveMigrationInProgress() || l.isPausedButHealthy(domainName)) {
-		log.Log.V(4).Infof("GuestPing for %s failed with %v but the VM is healthy although paused on this pod; suppressing probe error", domainName, err)
+		log.Log.V(4).Infof("GuestPing for %s failed with %v but the VM is healthy; suppressing probe error", domainName, err)
 		return nil
 	}
 	return err
@@ -745,8 +813,8 @@ func getVMIMigrationDataSize(vmi *v1.VirtualMachineInstance, ephemeralDiskDir st
 	return memory.ScaledValue(resource.Giga)
 }
 
-func (l *LibvirtDomainManager) CancelVMIMigration(vmi *v1.VirtualMachineInstance) error {
-	return l.cancelMigration(vmi)
+func (l *LibvirtDomainManager) CancelVMIMigration(vmi *v1.VirtualMachineInstance) {
+	l.cancelMigration(vmi)
 }
 
 func (l *LibvirtDomainManager) MigrateVMI(vmi *v1.VirtualMachineInstance, options *cmdclient.MigrationOptions) error {
@@ -997,7 +1065,7 @@ func possibleGuestSize(disk api.Disk, dt disksource.ResolvedDiskSource) (int64, 
 	}
 
 	if disk.Capacity == nil {
-		log.DefaultLogger().Error("No disk capacity")
+		log.DefaultLogger().V(3).Infof("No disk capacity for disk %s, skipping expansion", disk.Alias.GetName())
 		return 0, false
 	}
 	if disk.FilesystemOverhead == nil {
@@ -1066,6 +1134,18 @@ func shouldExpandOffline(disk api.Disk) bool {
 	return true
 }
 
+func (l *LibvirtDomainManager) getGPUDevices(vmi *v1.VirtualMachineInstance) ([]api.HostDevice, error) {
+	gpuHostDevices, err := gpu.CreateHostDevices(vmi.Spec.Domain.Devices.GPUs)
+	if err != nil {
+		return nil, err
+	}
+	gpuDRAHostDevices, err := dra.CreateDRAGPUHostDevices(vmi, drautil.DefaultMetadataBasePath)
+	if err != nil {
+		return nil, err
+	}
+	return append(gpuHostDevices, gpuDRAHostDevices...), nil
+}
+
 func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineInstance, allowEmulation bool, options *cmdv1.VirtualMachineOptions, isMigrationTarget bool) (*convertertypes.ConverterContext, error) {
 
 	logger := log.Log.Object(vmi)
@@ -1121,6 +1201,8 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		}
 	}
 
+	efiEnv := selectEFIEnvironment(l.efiEnvironment, l.ovmfPath, l.allowCrossArchEmulation, vmi.Spec.Architecture)
+
 	var efiConf *convertertypes.EFIConfiguration
 	if vmi.IsBootloaderEFI() {
 		secureBoot := vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot == nil || *vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot
@@ -1136,24 +1218,39 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		} else if tdx {
 			vmType = efi.TDX
 		}
-		if !l.efiEnvironment.Bootable(secureBoot, vmType) {
-			log.Log.Errorf("EFI OVMF roms missing for booting in EFI mode with SecureBoot=%v, SEV/SEV-ES=%v, SEV-SNP=%v, TDX=%v", secureBoot, sev, snp, tdx)
-			return nil, fmt.Errorf("EFI OVMF roms missing for booting in EFI mode with SecureBoot=%v, SEV/SEV-ES=%v, SEV-SNP=%v, TDX=%v", secureBoot, sev, snp, tdx)
-		}
 
-		efiConf = &convertertypes.EFIConfiguration{
-			EFICode:      l.efiEnvironment.EFICode(secureBoot, vmType),
-			EFIVars:      l.efiEnvironment.EFIVars(secureBoot, vmType),
-			SecureLoader: secureBoot,
+		if secureBoot && vmType == efi.None && l.firmwareAutoSelectionEnabled {
+			log.Log.V(4).Infof("Using firmware auto-selection for EFI Secure Boot")
+			efiConf = &convertertypes.EFIConfiguration{
+				SecureLoader:              true,
+				UsesFirmwareAutoSelection: true,
+			}
+		} else {
+			if !efiEnv.Bootable(secureBoot, vmType) {
+				log.Log.Errorf("EFI OVMF roms missing for booting in EFI mode with SecureBoot=%v, SEV/SEV-ES=%v, SEV-SNP=%v, TDX=%v", secureBoot, sev, snp, tdx)
+				return nil, fmt.Errorf("EFI OVMF roms missing for booting in EFI mode with SecureBoot=%v, SEV/SEV-ES=%v, SEV-SNP=%v, TDX=%v", secureBoot, sev, snp, tdx)
+			}
+
+			// TDX Secure Boot uses stateless ROM with embedded keys, so libvirt's
+			// secure="yes" loader attribute (which implies SMM) must not be set.
+			secureLoader := secureBoot && !tdx
+
+			efiConf = &convertertypes.EFIConfiguration{
+				EFICode:      efiEnv.EFICode(secureBoot, vmType),
+				EFIVars:      efiEnv.EFIVars(secureBoot, vmType),
+				SecureLoader: secureLoader,
+			}
 		}
 	}
 
 	// Map the VirtualMachineInstance to the Domain
 
 	c := &convertertypes.ConverterContext{
-		Architecture:              arch.NewConverter(runtime.GOARCH),
+		Architecture:              selectArchConverter(l.allowCrossArchEmulation, vmi.Spec.Architecture),
 		VirtualMachine:            vmi,
 		AllowEmulation:            allowEmulation,
+		AllowCrossArchEmulation:   l.allowCrossArchEmulation && vmi.Spec.Architecture != "" && vmi.Spec.Architecture != runtime.GOARCH,
+		HostArchitecture:          runtime.GOARCH,
 		HypervisorDeviceAvailable: l.hypervisorDeviceAvailable,
 		CPUSet:                    podCPUSet,
 		IsBlockPVC:                isBlockPVCMap,
@@ -1170,8 +1267,8 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		HypervisorName:            l.hypervisorName,
 	}
 
+	vGPULiveMigrationEnabled := false
 	if options != nil {
-		c.ExpandDisksEnabled = options.ExpandDisksEnabled
 		if options.VirtualMachineSMBios != nil {
 			c.SMBios = options.VirtualMachineSMBios
 		}
@@ -1183,13 +1280,15 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		c.VolumesDiscardIgnore = options.PreallocatedVolumes
 
 		if options.GetClusterConfig() != nil {
-			c.ExpandDisksEnabled = options.GetClusterConfig().GetExpandDisksEnabled()
 			c.FreePageReporting = isFreePageReportingEnabled(options.GetClusterConfig().GetFreePageReportingDisabled(), vmi)
 			c.BochsForEFIGuests = options.GetClusterConfig().GetBochsDisplayForEFIGuests()
 			c.SerialConsoleLog = isSerialConsoleLogEnabled(options.GetClusterConfig().GetSerialConsoleLogDisabled(), vmi)
 			c.PCINUMAAwareTopologyEnabled = options.GetClusterConfig().GetPCINUMAAwareTopologyEnabled()
+			c.GraceIOVirtualizationEnabled = options.GetClusterConfig().GetGraceIOVirtualizationEnabled()
+			vGPULiveMigrationEnabled = options.GetClusterConfig().GetVGPULiveMigrationEnabled()
 		}
 
+		c.GraceHostDeviceAliases = options.GetGraceHostDeviceAliases()
 		c.DomainAttachmentByInterfaceName = options.GetInterfaceDomainAttachment()
 	}
 	c.DisksInfo = l.disksInfo
@@ -1200,6 +1299,14 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 			return nil, err
 		}
 
+		sriovDRADevices, err := sriov.CreateDRAHostDevices(vmi, drautil.DefaultMetadataBasePath)
+		if err != nil {
+			return nil, err
+		}
+		// The two builders partition SR-IOV interfaces by source: Multus-backed vs DRA-backed.
+		// They are mutually exclusive, so appending cannot introduce duplicates.
+		sriovDevices = append(sriovDevices, sriovDRADevices...)
+
 		c.HotplugVolumes = hotplugVolumes
 		c.SRIOVDevices = sriovDevices
 
@@ -1209,25 +1316,48 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		}
 		c.GenericHostDevices = genericHostDevices
 
-		gpuHostDevices, err := gpu.CreateHostDevices(vmi.Spec.Domain.Devices.GPUs)
-		if err != nil {
-			return nil, err
-		}
-		c.GPUHostDevices = gpuHostDevices
-
 		genericDRAHostDevices, err := dra.CreateDRAHostDevices(vmi, drautil.DefaultMetadataBasePath)
 		if err != nil {
 			return nil, err
 		}
 		c.GenericHostDevices = append(c.GenericHostDevices, genericDRAHostDevices...)
 
-		gpuDRAHostDevices, err := dra.CreateDRAGPUHostDevices(vmi, drautil.DefaultMetadataBasePath)
+		gpuDevices, err := l.getGPUDevices(vmi)
 		if err != nil {
 			return nil, err
 		}
-		c.GPUHostDevices = append(c.GPUHostDevices, gpuDRAHostDevices...)
+		c.GPUHostDevices = gpuDevices
+	} else if vGPULiveMigrationEnabled {
+		gpuDevices, err := l.getGPUDevices(vmi)
+		if err != nil {
+			return nil, err
+		}
+		if len(gpuDevices) > 1 && gpuDevices[0].Type == api.HostDeviceMDev {
+			return nil, fmt.Errorf("vGPU live migration currently only supports a single vGPU, found %d for vmi %s", len(gpuDevices), vmi.Name)
+		} else if len(gpuDevices) == 1 && gpuDevices[0].Type == api.HostDeviceMDev {
+			if !l.libvirtHooksServerAndClientEnabled {
+				return nil, fmt.Errorf("vGPU live migration requires LibvirtHooksServerAndClient feature gate for vmi %s", vmi.Name)
+			}
+			c.GPUHostDevices = gpuDevices
+		}
 	}
 
+	// Receive IOMMUFD file descriptor from the device plugin if available.
+	// The device plugin creates a one-shot Unix socket and bind-mounts it
+	// into the container at IOMMUFDSocketPath. If present, we receive the
+	// pre-configured FD via SCM_RIGHTS for later use with libvirt.
+	if l.iommuFD == -1 {
+		if _, statErr := os.Stat(IOMMUFDSocketPath); statErr == nil {
+			fd, recvErr := ReceiveIOMMUFD(IOMMUFDSocketPath)
+			if recvErr != nil {
+				return nil, fmt.Errorf("IOMMUFD socket exists but failed to receive FD: %w", recvErr)
+			} else {
+				l.iommuFD = fd
+				logger.V(3).Infof("Received IOMMUFD file descriptor: %d", fd)
+			}
+		}
+	}
+	c.IOMMUFDEnabled = l.iommuFD != -1
 	return c, nil
 }
 
@@ -1299,6 +1429,20 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, allowEmul
 	// TODO blocked state
 	switch {
 	case cli.IsDown(domState) && !vmi.IsRunning() && !vmi.IsFinal():
+		// Associate IOMMUFD FD with the domain before starting.
+		// libvirt will use this FD (named "iommu") for hostdev elements
+		// that specify fdgroup='iommu' in their driver configuration.
+		if l.iommuFD >= 0 {
+			dupFD, err := syscall.Dup(l.iommuFD)
+			if err != nil {
+				return nil, fmt.Errorf("failed to dup IOMMUFD FD: %w", err)
+			}
+			iommuFile := os.NewFile(uintptr(dupFD), "iommufd")
+			defer iommuFile.Close()
+			if err := dom.FDAssociate("iommu", []os.File{*iommuFile}, 0); err != nil {
+				return nil, fmt.Errorf("failed to associate IOMMUFD FD with domain: %w", err)
+			}
+		}
 		if err := l.startDomain(vmi, dom); err != nil {
 			return nil, err
 		}
@@ -1329,7 +1473,9 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, allowEmul
 		return nil, err
 	}
 
+	l.refreshDeviceAliasMap(dom)
 	l.syncGracePeriod(vmi)
+	l.syncGuestAgentProbePaused(vmi)
 
 	// TODO: check if VirtualMachineInstance Spec and Domain Spec are equal or if we have to sync
 	return oldSpec, nil
@@ -1420,28 +1566,7 @@ func (l *LibvirtDomainManager) syncDisks(
 		}
 	}
 
-	// Resize and notify the VM about changed disks
-	for _, disk := range domain.Spec.Devices.Disks {
-		if !isPVCBacked(disk.Alias.GetName(), vmi) {
-			continue
-		}
-		ds := disksource.Resolve(disk)
-		if ok, possibleGuestSize := shouldExpandOnline(dom, disk, ds); ok {
-			flags := libvirt.DOMAIN_BLOCK_RESIZE_BYTES
-			if possibleGuestSize == 0 {
-				if ds.HasOverlay() {
-					// https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainBlockResize
-					continue
-				}
-				flags |= libvirt.DOMAIN_BLOCK_RESIZE_CAPACITY
-			}
-			logger.V(1).Infof("resizing disk %s with flags %d with size %d", disk.Alias.GetName(), flags, possibleGuestSize)
-			err := dom.BlockResize(ds.SourcePath(), uint64(possibleGuestSize), flags)
-			if err != nil {
-				logger.Reason(err).Errorf("libvirt failed to expand disk image %v", disk)
-			}
-		}
-	}
+	l.expandDisksOnline(dom, domain, vmi)
 
 	return nil
 }
@@ -1512,7 +1637,7 @@ func (l *LibvirtDomainManager) allocateHotplugPorts(
 	logger := log.Log.Object(vmi)
 
 	if !defaults.SupportsPCIeHotplug(&vmi.Spec) {
-		logger.Infof("Skipping hotplug port allocation: architecture or machine type does not support PCIe topology")
+		logger.Infof("Skipping hotplug port allocation: spec does not support PCIe topology")
 		return l.setDomainSpecWithHooks(vmi, domainSpec)
 	}
 
@@ -1538,17 +1663,33 @@ func (l *LibvirtDomainManager) allocateHotplugPorts(
 		return nil, err
 	}
 
+	// When placeholderCount == 0, WithNetworkIfacesResources skips the
+	// read-back, so domainSpec lacks libvirt-assigned Target.BusNr values
+	// needed by DisableHotplugOnOccupiedRootPorts.
+	if placeholderCount == 0 {
+		readBack, readErr := util.GetDomainSpecWithFlags(dom, libvirt.DOMAIN_XML_INACTIVE)
+		if readErr != nil {
+			return nil, readErr
+		}
+		readBack.Devices.DeepCopyInto(&domainSpec.Devices)
+	}
+
 	// Extra controllers must be added AFTER WithNetworkIfacesResources so
 	// that libvirt has already assigned devices to root ports. Controllers
 	// appended here get indices above the occupied ports and remain empty,
 	// providing genuine hotplug capacity.
 	if extraControllers > 0 {
 		appendPCIeRootPortControllers(domainSpec, extraControllers)
-		dom.Free()
-		dom, err = l.setDomainSpecWithHooks(vmi, domainSpec)
-		if err != nil {
-			return nil, err
-		}
+	}
+
+	pci.DisableHotplugOnOccupiedRootPorts(domainSpec)
+
+	if freeErr := dom.Free(); freeErr != nil {
+		err = errors.Join(err, freeErr)
+	}
+	dom, err = l.setDomainSpecWithHooks(vmi, domainSpec)
+	if err != nil {
+		return nil, err
 	}
 
 	return dom, nil
@@ -1747,7 +1888,7 @@ func getUpdatedDisks(oldDisks, newDisks []api.Disk) []api.Disk {
 var isHotplugBlockDeviceVolume = isHotplugBlockDeviceVolumeFunc
 
 func isHotplugBlockDeviceVolumeFunc(volumeName string) bool {
-	path := converter.GetHotplugBlockDeviceVolumePath(volumeName)
+	path := volumepath.HotplugBlockDevice(volumeName)
 	fileInfo, err := os.Stat(path)
 	if err == nil {
 		if (fileInfo.Mode() & os.ModeDevice) != 0 {
@@ -1761,7 +1902,7 @@ func isHotplugBlockDeviceVolumeFunc(volumeName string) bool {
 var isBlockDeviceVolume = isBlockDeviceVolumeFunc
 
 func isBlockDeviceVolumeFunc(volumeName string) (bool, error) {
-	path := converter.GetBlockDeviceVolumePath(volumeName)
+	path := volumepath.BlockDevice(volumeName)
 	fileInfo, err := os.Stat(path)
 	if err == nil {
 		if (fileInfo.Mode() & os.ModeDevice) != 0 {
@@ -1771,7 +1912,7 @@ func isBlockDeviceVolumeFunc(volumeName string) (bool, error) {
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		// cross check: is it a filesystem volume
-		path = converter.GetFilesystemVolumePath(volumeName)
+		path = volumepath.Filesystem(volumeName)
 		fileInfo, err := os.Stat(path)
 		if err == nil {
 			if fileInfo.Mode().IsRegular() {
@@ -1784,39 +1925,6 @@ func isBlockDeviceVolumeFunc(volumeName string) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("error checking for block device: %v", err)
-}
-
-func shouldExpandOnline(dom cli.VirDomain, disk api.Disk, dt disksource.ResolvedDiskSource) (bool, int64) {
-	blockInfo, err := dom.GetBlockInfo(dt.SourcePath(), 0)
-	if err != nil {
-		log.DefaultLogger().Reason(err).Error("Failed to get block info")
-		return false, 0
-	}
-	if blockInfo.Capacity == 0 {
-		// A zero capacity indicates the source is not a valid disk
-		// image or that libvirt could not determine its size; skip
-		// expansion rather than risk incorrect resizing.
-		log.DefaultLogger().Warningf("domain disk %s returned capacity 0", disk.Alias.GetName())
-		return false, 0
-	}
-	// If block device, expand if capacity is lower than physical
-	if dt.BackendIsBlock() && blockInfo.Capacity >= blockInfo.Physical {
-		return false, 0
-	}
-
-	possibleGuestSize, ok := possibleGuestSize(disk, dt)
-	log.DefaultLogger().V(3).Infof("domain disk: %s, blockInfo reported size: %d, possibleGuestSize: %d",
-		disk.Alias.GetName(),
-		blockInfo.Capacity,
-		possibleGuestSize,
-	)
-	if !ok {
-		return false, 0
-	}
-	if !dt.BackendIsBlock() && possibleGuestSize <= int64(blockInfo.Capacity) {
-		return false, 0
-	}
-	return true, possibleGuestSize
 }
 
 func (l *LibvirtDomainManager) getDomainSpec(dom cli.VirDomain) (*api.DomainSpec, error) {
@@ -2193,17 +2301,61 @@ func (l *LibvirtDomainManager) GetDomainDirtyRateStats(calculationDuration time.
 	return dirtyRateStats, nil
 }
 
+func (l *LibvirtDomainManager) refreshDeviceAliasMap(dom cli.VirDomain) {
+	domSpec, err := util.GetDomainSpecWithFlags(dom, 0)
+	if err != nil {
+		log.Log.Reason(err).Warning("failed to refresh device alias map")
+		return
+	}
+	newMap := make(map[string]string)
+	for _, iface := range domSpec.Devices.Interfaces {
+		if iface.Target != nil && iface.Alias != nil {
+			newMap[iface.Target.Device] = iface.Alias.GetName()
+		}
+	}
+	for _, disk := range domSpec.Devices.Disks {
+		if disk.Target.Device != "" && disk.Alias != nil {
+			newMap[disk.Target.Device] = disk.Alias.GetName()
+		}
+	}
+	l.devAliasLock.Lock()
+	l.devAliasMap = newMap
+	l.devAliasLock.Unlock()
+}
+
+func (l *LibvirtDomainManager) getDeviceAliasMap() map[string]string {
+	l.devAliasLock.RLock()
+	defer l.devAliasLock.RUnlock()
+	return l.devAliasMap
+}
+
 func (l *LibvirtDomainManager) getDomainStats() ([]*stats.DomainStats, error) {
 	statsTypes := libvirt.DOMAIN_STATS_BALLOON | libvirt.DOMAIN_STATS_CPU_TOTAL | libvirt.DOMAIN_STATS_VCPU | libvirt.DOMAIN_STATS_INTERFACE | libvirt.DOMAIN_STATS_BLOCK | libvirt.DOMAIN_STATS_DIRTYRATE
-	flags := libvirt.CONNECT_GET_ALL_DOMAINS_STATS_RUNNING | libvirt.CONNECT_GET_ALL_DOMAINS_STATS_PAUSED
+	flags := libvirt.CONNECT_GET_ALL_DOMAINS_STATS_RUNNING | libvirt.CONNECT_GET_ALL_DOMAINS_STATS_PAUSED | libvirt.CONNECT_GET_ALL_DOMAINS_STATS_NOWAIT
 
 	domstats, err := l.virConn.GetDomainStats(statsTypes, l.domainInfoStats, flags)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain stats: %v", err)
 	}
 
-	if l.agentData != nil {
-		for _, ds := range domstats {
+	aliasMap := l.getDeviceAliasMap()
+	for _, ds := range domstats {
+		for i, net := range ds.Net {
+			if net.NameSet {
+				if alias, ok := aliasMap[net.Name]; ok {
+					ds.Net[i].AliasSet = true
+					ds.Net[i].Alias = alias
+				}
+			}
+		}
+		for i, blk := range ds.Block {
+			if blk.NameSet {
+				if alias, ok := aliasMap[blk.Name]; ok {
+					ds.Block[i].Alias = alias
+				}
+			}
+		}
+		if l.agentData != nil {
 			ds.Load = l.agentData.GetLoad()
 		}
 	}
@@ -2455,6 +2607,28 @@ func (l *LibvirtDomainManager) GetFilesystems() []v1.VirtualMachineInstanceFileS
 	return fsList
 }
 
+func (l *LibvirtDomainManager) GetGuestAgentVersion() string {
+	return l.agentData.GetGA().Version
+}
+
+func (l *LibvirtDomainManager) GetAgentData(dataKey string) (string, error) {
+	if l.agentDataCaches == nil {
+		return "", fmt.Errorf("agent data caches not initialized")
+	}
+
+	cache, exists := l.agentDataCaches[dataKey]
+	if !exists {
+		return "", fmt.Errorf("cache not found for data key: %s", dataKey)
+	}
+
+	data, err := cache.Get()
+	if err != nil {
+		return data, fmt.Errorf("failed to get agent data for %s: %w", dataKey, err)
+	}
+
+	return data, nil
+}
+
 func (l *LibvirtDomainManager) GetScreenshot(vmi *v1.VirtualMachineInstance) (*cmdv1.ScreenshotResponse, error) {
 	domName := api.VMINamespaceKeyFunc(vmi)
 	dom, err := l.virConn.LookupDomainByName(domName)
@@ -2663,6 +2837,14 @@ func (l *LibvirtDomainManager) syncGracePeriod(vmi *v1.VirtualMachineInstance) {
 	})
 }
 
+func (l *LibvirtDomainManager) syncGuestAgentProbePaused(vmi *v1.VirtualMachineInstance) {
+	paused, _ := strconv.ParseBool(vmi.Annotations[v1.PauseGuestAgentProbesAnnotation])
+	wasPaused := l.guestAgentProbePaused.Swap(paused)
+	if paused != wasPaused {
+		log.Log.Object(vmi).Infof("Guest agent probe pause state changed: paused=%t", paused)
+	}
+}
+
 func getDiskTargetPathFromImageVolumeView(volumeIndex int, volumePath string) (*safepath.Path, error) {
 	if volumePath != "" {
 		return safepath.JoinAndResolveWithRelativeRoot(kutil.VirtImageVolumeDir, fmt.Sprintf("disk_%d", volumeIndex), volumePath)
@@ -2720,7 +2902,6 @@ func getDomainCreateFlags(vmi *v1.VirtualMachineInstance) libvirt.DomainCreateFl
 }
 
 // calculateHotplugPortCountV1 returns the v1 placeholder count: max(0, 4 - len(interfaces)).
-// This formula is frozen and must match calculateHotplugPortCountV1ForDetection in pkg/virt-handler/pci_topology.go.
 func calculateHotplugPortCountV1(vmi *v1.VirtualMachineInstance) int {
 	if vmi.Annotations[v1.PlacePCIDevicesOnRootComplex] == "true" {
 		return 0
@@ -2768,4 +2949,27 @@ func (l *LibvirtDomainManager) BackupVirtualMachine(vmi *v1.VirtualMachineInstan
 
 func (l *LibvirtDomainManager) RedefineCheckpoint(vmi *v1.VirtualMachineInstance, checkpoint *backupv1.BackupCheckpoint) (checkpointInvalid bool, err error) {
 	return l.storageManager.RedefineCheckpoint(vmi, checkpoint)
+}
+
+func AgentDataCommandTTLKeys() []string {
+	keys := make([]string, 0, len(agentDataCommandTTLs))
+	for k := range agentDataCommandTTLs {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func selectEFIEnvironment(hostEFI *efi.EFIEnvironment, ovmfPath string, allowCrossArchEmulation bool, guestArch string) *efi.EFIEnvironment {
+	if allowCrossArchEmulation && guestArch != "" && guestArch != runtime.GOARCH {
+		return efi.DetectEFIEnvironment(guestArch, ovmfPath)
+	}
+	return hostEFI
+}
+
+func selectArchConverter(allowCrossArchEmulation bool, guestArch string) arch.Converter {
+	vmArch := runtime.GOARCH
+	if allowCrossArchEmulation && guestArch != "" && guestArch != runtime.GOARCH {
+		vmArch = guestArch
+	}
+	return arch.NewConverter(vmArch)
 }

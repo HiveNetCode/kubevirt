@@ -109,7 +109,12 @@ var _ = Describe("Device Controller", func() {
 		ctrl = gomock.NewController(GinkgoT())
 		mockPCI = NewMockDeviceHandler(ctrl)
 		mockPCI.EXPECT().GetDevicePCIID(gomock.Any(), gomock.Any()).Return("1234:5678", nil).AnyTimes()
+
+		oldHandler := handler
 		handler = mockPCI
+		DeferCleanup(func() {
+			handler = oldHandler
+		})
 
 		fakeConfigMap, _, _ = testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
 			PermittedHostDevices: &v1.PermittedHostDevices{
@@ -197,7 +202,15 @@ var _ = Describe("Device Controller", func() {
 			Eventually(func() int {
 				return int(atomic.LoadInt32(&plugin2.Starts))
 			}, 5*time.Second).Should(BeNumerically(">=", 1))
-			Expect(deviceController.Initialized()).To(BeTrue())
+			// The always-on SEV plugin can't bind its socket in the sandbox, so
+			// scope the check to the plugin under test, not controller-wide Initialized().
+			Eventually(func(g Gomega) {
+				deviceController.startedPluginsMutex.Lock()
+				defer deviceController.startedPluginsMutex.Unlock()
+				dev, exists := deviceController.startedPlugins[deviceName2]
+				g.Expect(exists).To(BeTrue())
+				g.Expect(dev.devicePlugin.GetInitialized()).To(BeTrue())
+			}, 5*time.Second).Should(Succeed())
 		})
 
 		It("should restart the device plugin with delays if it returns errors", func() {

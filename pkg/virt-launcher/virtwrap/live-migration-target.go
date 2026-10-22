@@ -31,18 +31,20 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
 	"libvirt.org/go/libvirt"
 
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
+
 	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/net/ip"
@@ -51,6 +53,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 )
 
@@ -168,17 +171,17 @@ func (l *LibvirtDomainManager) prepareMigrationTarget(
 		}
 	}
 
-	if l.libvirtHooksServerAndClientEnabled {
-		if l.hookServer != nil {
-			if err := l.hookServer.Start(vmi); err != nil {
-				return err
-			}
-		}
-	}
-
 	c, err := l.generateConverterContext(vmi, allowEmulation, options, true)
 	if err != nil {
 		return fmt.Errorf("Failed to generate libvirt domain from VMI spec: %v", err)
+	}
+
+	if l.libvirtHooksServerAndClientEnabled {
+		if l.hookServer != nil {
+			if err := l.hookServer.Start(c); err != nil {
+				return err
+			}
+		}
 	}
 
 	if cbt.HasCBTStateEnabled(vmi.Status.ChangedBlockTracking) {
@@ -219,6 +222,14 @@ func (l *LibvirtDomainManager) prepareMigrationTarget(
 	if err != nil {
 		return fmt.Errorf("executing custom preStart hooks failed: %v", err)
 	}
+	if pluginList := plugins.GetPlugins(); len(pluginList) > 0 {
+		updatedSpec, _, err := plugins.ApplyDomainHooks(pluginList, vmi, &dom.Spec,
+			pluginv1alpha1.InvocationContextMigrationTarget)
+		if err != nil {
+			return fmt.Errorf("applying plugin domain hooks failed: %v", err)
+		}
+		updatedSpec.DeepCopyInto(&dom.Spec)
+	}
 
 	if shouldBlockMigrationTargetPreparation(vmi) {
 		return fmt.Errorf("Blocking preparation of migration target in order to satisfy a functional test condition")
@@ -240,18 +251,23 @@ func (l *LibvirtDomainManager) prepareMigrationTarget(
 		logger.V(3).Info("Setting up TCP proxies to support incoming legacy VMI migration")
 		loopbackAddress := ip.GetLoopbackAddress()
 
+		mountRoot, err := safepath.JoinAndResolveWithRelativeRoot(l.virtShareDir)
+		if err != nil {
+			logger.Reason(err).Error("failed to create mount root for migration proxy")
+			return err
+		}
+
 		migrationPortsRange := migrationproxy.GetMigrationPortsList(vmi.IsBlockMigration())
 		for _, port := range migrationPortsRange {
 			// Prepare the direct migration proxy
 			key := migrationproxy.ConstructProxyKey(string(vmi.UID), port)
 			curDirectAddress := net.JoinHostPort(loopbackAddress, strconv.Itoa(port))
-			unixSocketPath := migrationproxy.SourceUnixFile(l.virtShareDir, key)
-			logger.V(2).Infof("Creating socketpath for unix migration/tcp %s", unixSocketPath)
-			migrationProxy := migrationproxy.NewSourceProxy(unixSocketPath, curDirectAddress, nil, nil, string(vmi.UID))
+			unixSocketPath := migrationproxy.SourceUnixFile("/", key)
+			migrationProxy := migrationproxy.NewSourceProxy(mountRoot, unixSocketPath, curDirectAddress, nil, nil, string(vmi.UID))
 
 			err := migrationProxy.Start()
 			if err != nil {
-				logger.Reason(err).Errorf("proxy listening failed, socket %s", unixSocketPath)
+				logger.Reason(err).Errorf("proxy listening failed, socket %s", migrationproxy.SourceUnixFile(l.virtShareDir, key))
 				return err
 			}
 
@@ -336,33 +352,23 @@ func getVMIHotplugCount(vmi *v1.VirtualMachineInstance) int {
 // See https://issues.redhat.com/browse/RHEL-117250
 type TargetMigrationMonitor struct {
 	c             cli.Connection
-	events        chan watch.Event
-	vmi           *v1.VirtualMachineInstance
+	logger        *log.FilteredLogger
 	domain        *api.Domain
 	metadataCache *metadata.Cache
-	notifier      MigrationEventNotifier
-}
-
-type MigrationEventNotifier interface {
-	SendEvent(event watch.Event) error
-	UpdateEvents(event watch.Event)
 }
 
 func NewTargetMigrationMonitor(
 	c cli.Connection,
-	events chan watch.Event,
-	vmi *v1.VirtualMachineInstance,
+	logger *log.FilteredLogger,
 	domain *api.Domain,
 	metadataCache *metadata.Cache,
-	notifier MigrationEventNotifier,
 ) *TargetMigrationMonitor {
 	return &TargetMigrationMonitor{
 		c:             c,
-		events:        events,
-		vmi:           vmi,
+		logger:        logger,
 		domain:        domain,
 		metadataCache: metadataCache,
-		notifier:      notifier}
+	}
 }
 
 var retryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second}
@@ -370,7 +376,7 @@ var retryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Sec
 func (m *TargetMigrationMonitor) StartMonitor() {
 	go func() {
 		var err error
-		domName := api.VMINamespaceKeyFunc(m.vmi)
+		domName := m.domain.Spec.Name
 		for attempt := 0; attempt <= len(retryDelays); attempt++ {
 			err = virtwait.PollImmediately(100*time.Millisecond, 3*time.Second, func(context context.Context) (bool, error) {
 				dom, err := m.c.LookupDomainByName(domName)
@@ -380,7 +386,7 @@ func (m *TargetMigrationMonitor) StartMonitor() {
 				defer dom.Free()
 				jobInfo, err := dom.GetJobInfo()
 				if err != nil {
-					log.Log.Object(m.vmi).V(4).Reason(err).Info("Failed to get domain job info")
+					m.logger.V(4).Reason(err).Info("Failed to get domain job info")
 					// This can happen if the current job doesn't support `GetJobInfo()`, let's try again
 					return false, nil
 				}
@@ -388,24 +394,21 @@ func (m *TargetMigrationMonitor) StartMonitor() {
 					// No migration job is currently running
 					return true, nil
 				}
-				log.Log.Object(m.vmi).V(4).Infof("Incoming migration job active (type %d)", jobInfo.Type)
+				m.logger.V(4).Infof("Incoming migration job active (type %d)", jobInfo.Type)
 				return false, nil
 			})
 			if err == nil || attempt == len(retryDelays) {
 				break
 			}
-			log.Log.Object(m.vmi).Info("A migration job is still active, retrying after delay")
+			m.logger.Info("A migration job is still active, retrying after delay")
 			time.Sleep(retryDelays[attempt])
 		}
 		if err != nil {
-			log.Log.Object(m.vmi).Info("Error polling libvirt, setting EndTimestamp anyway to unblock migration")
+			m.logger.Info("Error polling libvirt, setting EndTimestamp anyway to unblock migration")
 		} else {
-			log.Log.Object(m.vmi).Info("Incoming migration job completed, setting EndTimestamp")
+			m.logger.Info("Incoming migration job completed, setting EndTimestamp")
 		}
 		setEndTimestamp(m.metadataCache)
-		event := watch.Event{Type: watch.Modified, Object: m.domain}
-		m.notifier.SendEvent(event)
-		m.notifier.UpdateEvents(event)
 	}()
 }
 

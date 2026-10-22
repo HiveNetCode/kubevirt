@@ -20,7 +20,6 @@
 package types
 
 import (
-	k8sv1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
 
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
@@ -32,16 +31,16 @@ import (
 )
 
 type EFIConfiguration struct {
-	EFICode      string
-	EFIVars      string
-	SecureLoader bool
+	EFICode                   string
+	EFIVars                   string
+	SecureLoader              bool
+	UsesFirmwareAutoSelection bool
 }
 
 type ConverterContext struct {
 	Architecture                    arch.Converter
 	AllowEmulation                  bool
 	HypervisorDeviceAvailable       bool
-	Secrets                         map[string]*k8sv1.Secret
 	VirtualMachine                  *v1.VirtualMachineInstance
 	CPUSet                          []int
 	IsBlockPVC                      map[string]bool
@@ -61,7 +60,6 @@ type ConverterContext struct {
 	EphemeraldiskCreator            ephemeraldisk.EphemeralDiskCreatorInterface
 	VolumesDiscardIgnore            []string
 	Topology                        *cmdv1.Topology
-	ExpandDisksEnabled              bool
 	UseLaunchSecuritySEV            bool // For AMD SEV/ES/SNP
 	UseLaunchSecurityTDX            bool // For Intel TDX
 	UseLaunchSecurityPV             bool // For IBM SE(s390-pv)
@@ -69,6 +67,11 @@ type ConverterContext struct {
 	BochsForEFIGuests               bool
 	SerialConsoleLog                bool
 	PCINUMAAwareTopologyEnabled     bool
+	GraceIOVirtualizationEnabled    bool
+	GraceHostDeviceAliases          []string
 	DomainAttachmentByInterfaceName map[string]string
 	HypervisorName                  string
+	IOMMUFDEnabled                  bool
+	AllowCrossArchEmulation         bool
+	HostArchitecture                string
 }

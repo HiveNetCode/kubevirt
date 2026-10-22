@@ -10,6 +10,7 @@
 package cli
 
 import (
+	os "os"
 	reflect "reflect"
 	time "time"
 
@@ -170,6 +171,21 @@ func (m *MockConnection) DomainEventMemoryDeviceSizeChangeRegister(callback libv
 func (mr *MockConnectionMockRecorder) DomainEventMemoryDeviceSizeChangeRegister(callback any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DomainEventMemoryDeviceSizeChangeRegister", reflect.TypeOf((*MockConnection)(nil).DomainEventMemoryDeviceSizeChangeRegister), callback)
+}
+
+// DomainEventMigrationIterationRegister mocks base method.
+func (m *MockConnection) DomainEventMigrationIterationRegister(callback libvirt.DomainEventMigrationIterationCallback) (int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DomainEventMigrationIterationRegister", callback)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DomainEventMigrationIterationRegister indicates an expected call of DomainEventMigrationIterationRegister.
+func (mr *MockConnectionMockRecorder) DomainEventMigrationIterationRegister(callback any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DomainEventMigrationIterationRegister", reflect.TypeOf((*MockConnection)(nil).DomainEventMigrationIterationRegister), callback)
 }
 
 // GetAllDomainStats mocks base method.
@@ -581,6 +597,20 @@ func (mr *MockVirDomainMockRecorder) DetachDeviceFlags(xml, flags any) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DetachDeviceFlags", reflect.TypeOf((*MockVirDomain)(nil).DetachDeviceFlags), xml, flags)
 }
 
+// FDAssociate mocks base method.
+func (m *MockVirDomain) FDAssociate(name string, files []os.File, flags libvirt.DomainFDAssociateFlags) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FDAssociate", name, files, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// FDAssociate indicates an expected call of FDAssociate.
+func (mr *MockVirDomainMockRecorder) FDAssociate(name, files, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FDAssociate", reflect.TypeOf((*MockVirDomain)(nil).FDAssociate), name, files, flags)
+}
+
 // FSFreeze mocks base method.
 func (m *MockVirDomain) FSFreeze(mounts []string, flags uint32) error {
 	m.ctrl.T.Helper()
@@ -787,6 +817,20 @@ func (m *MockVirDomain) MemoryStats(nrStats, flags uint32) ([]libvirt.DomainMemo
 func (mr *MockVirDomainMockRecorder) MemoryStats(nrStats, flags any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MemoryStats", reflect.TypeOf((*MockVirDomain)(nil).MemoryStats), nrStats, flags)
+}
+
+// MigrateSetMaxDowntime mocks base method.
+func (m *MockVirDomain) MigrateSetMaxDowntime(downtime uint64, flags uint32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MigrateSetMaxDowntime", downtime, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MigrateSetMaxDowntime indicates an expected call of MigrateSetMaxDowntime.
+func (mr *MockVirDomainMockRecorder) MigrateSetMaxDowntime(downtime, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MigrateSetMaxDowntime", reflect.TypeOf((*MockVirDomain)(nil).MigrateSetMaxDowntime), downtime, flags)
 }
 
 // MigrateStartPostCopy mocks base method.

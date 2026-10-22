@@ -40,6 +40,7 @@ if [[ ${CI} == "true" && -n "$PULL_BASE_SHA" && -n "$PULL_PULL_SHA" && "$JOB_NAM
         echo "Aborting as there were only none-code related changes detected."
         exit 0
     fi
+    RPM_CHANGES=$(echo "$CI_GIT_ALL_CHANGES" | grep -E '^(rpm/|WORKSPACE)' || :)
  fi
 
 if [ -z $TARGET ]; then
@@ -56,7 +57,7 @@ add_feature_gate() {
 }
 
 export KUBEVIRT_DEPLOY_CDI=true
-export KUBEVIRT_CUSTOM_CDI_VERSION=v1.65.0
+export KUBEVIRT_CUSTOM_CDI_VERSION=v1.66.0
 if [[ ! $TARGET =~ .*kind.* ]]; then
   add_feature_gate "NodeRestriction"
   export KUBEVIRT_PSA="true"
@@ -76,6 +77,16 @@ case "$TARGET" in
     export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
     export KUBEVIRT_PROVIDER=${TARGET/-sig-network*/}
     ;;
+  *emulated-igb*)
+    export KUBEVIRT_PROVIDER=${TARGET/-emulated-igb*/}
+    export KUBEVIRT_FUNC_TEST_SUITE_ARGS="${KUBEVIRT_FUNC_TEST_SUITE_ARGS} -emulated-sriov=true"
+    export KUBEVIRT_WITH_SRIOV=true
+    export KUBEVIRT_NUM_NODES=3
+    export KUBEVIRT_DEPLOY_CDI=false
+    export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
+    export KUBEVIRT_E2E_PARALLEL=false
+    export KUBEVIRT_VERBOSITY=${KUBEVIRT_VERBOSITY:-"virtLauncher:3,virtHandler:3"}
+    ;;
   *sig-storage*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-storage/}
     export KUBEVIRT_STORAGE="rook-ceph-default"
@@ -86,6 +97,12 @@ case "$TARGET" in
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-realtime/}
     export KUBEVIRT_HUGEPAGES_2M=512
     export KUBEVIRT_REALTIME_SCHEDULER=true
+    ;;
+  *sig-compute-parallel-wg-mshv-amd64*)
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-parallel-wg-mshv-amd64/}
+    export KUBEVIRT_COLLECT_CONTAINER_RUNTIME_DEBUG=true
+    add_feature_gate "ConfigurableHypervisor"
+    export HYPERVISOR="hyperv-direct"
     ;;
   *sig-compute-migrations-wg-arm64*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-migrations-wg-arm64/}
@@ -111,12 +128,21 @@ case "$TARGET" in
     ;;
   *sig-compute-serial*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-serial/}
+    add_feature_gate "Plugins"
     ;;
   *sig-compute-parallel*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-parallel/}
     ;;
   *sig-compute-conformance*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-conformance/}
+    ;;
+  *sig-compute-dra-gpu*)
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-dra-gpu/}
+    export KUBEVIRT_USE_FAKE_VFIO=true
+    export DRA_DRIVER_PROFILE=vfio-gpu
+    export FAKE_PCI_DEVICES=8
+    export DRA_DRIVER_NAME="vfio-gpu.example.com"
+    add_feature_gate "GPUsWithDRA"
     ;;
   *sig-compute*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
@@ -136,12 +162,6 @@ case "$TARGET" in
   *wg-arm64*)
     export KUBEVIRT_PROVIDER=${TARGET/-wg-arm64}
     export KUBEVIRT_COLLECT_CONTAINER_RUNTIME_DEBUG=true
-    ;;
-  *wg-mshv-amd64*)
-    export KUBEVIRT_PROVIDER=${TARGET/-wg-mshv-amd64/}
-    export KUBEVIRT_COLLECT_CONTAINER_RUNTIME_DEBUG=true
-    add_feature_gate "ConfigurableHypervisor"
-    export HYPERVISOR="hyperv-direct"
     ;;
   *sev*)
     export KUBEVIRT_PROVIDER=${TARGET/-sev}
@@ -170,7 +190,6 @@ if [[ $TARGET =~ sriov.* ]]; then
   fi
   export KUBEVIRT_DEPLOY_CDI="false"
   export KUBEVIRT_VERBOSITY=${KUBEVIRT_VERBOSITY:-"virtLauncher:3,virtHandler:3"}
-  add_feature_gate "ExternalNetResourceInjection"
 elif [[ $TARGET =~ vgpu.* ]]; then
   export KUBEVIRT_NUM_NODES=1
 else
@@ -349,12 +368,26 @@ if [ "$CI" != "true" ]; then
   make cluster-down
 fi
 
-# Create .bazelrc to use 4 jobs, remote cache and disable progress output
-cat >ci.bazelrc <<EOF
+# Create .bazelrc to use 4 jobs, remote cache and disable progress output.
+# Seed ci.bazelrc with /etc/bazel.bazelrc if it exists so the Bazel remote
+# cache configuration written by create_bazel_cache_rcs.sh during bootstrap
+# is propagated into the hack/dockerized builder container (which only sees
+# files rsync'd from the source tree).
+cp /etc/bazel.bazelrc ci.bazelrc 2>/dev/null || : >ci.bazelrc
+cat >>ci.bazelrc <<EOF
 build --jobs=4
-build --remote_download_toplevel
 build --noshow_progress
 EOF
+# Use --remote_download_toplevel for bandwidth savings, but skip it when
+# RPMs change since novel OCI image action hashes need their transitive
+# inputs downloaded to build locally.
+if [[ -z "${RPM_CHANGES:-}" ]]; then
+    echo "build --remote_download_toplevel" >>ci.bazelrc
+fi
+
+echo "=== ci.bazelrc ==="
+cat ci.bazelrc
+echo "=================="
 
 # Build and test images with a custom image name prefix
 export IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT:-kv-}
@@ -427,10 +460,17 @@ done
 kubectl version
 
 mkdir -p "$ARTIFACTS_PATH"
-export KUBEVIRT_E2E_PARALLEL=true
+export KUBEVIRT_E2E_PARALLEL="${KUBEVIRT_E2E_PARALLEL:-true}"
 # arm64 e2e test lane use kind provider
-if [[ $TARGET =~ .*kind.* ]] || [[ $TARGET =~ .*k3d.* ]] || [[ $TARGET =~ wg-arm64 ]]; then
-  export KUBEVIRT_E2E_PARALLEL=false
+if [[ $TARGET =~ .*kind.* ]]; then
+  # MSHV tests do not require serial execution
+  if ! [[ $TARGET =~ .*wg-mshv.* ]]; then
+    export KUBEVIRT_E2E_PARALLEL=false
+  fi
+else
+  if [[ $TARGET =~ .*k3d.* ]] || [[ $TARGET =~ wg-arm64 ]]; then
+    export KUBEVIRT_E2E_PARALLEL=false
+  fi
 fi
 
 ginko_params="--no-color"
@@ -520,13 +560,16 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
     label_filter='(sig-compute-migrations && !(GPU,VGPU)) && !(SEV, SEVES, secure-execution)'
   elif [[ $TARGET =~ sig-compute-serial ]]; then
     export KUBEVIRT_E2E_PARALLEL=false
-    label_filter='((sig-compute && Serial) && !(GPU,VGPU,sig-compute-migrations) && !(SEV, SEVES, secure-execution))'
+    label_filter='((sig-compute && Serial) && !(GPU,VGPU,DRA-GPU,sig-compute-migrations) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-compute-parallel ]]; then
     label_filter='(sig-compute && !(Serial,GPU,VGPU,sig-compute-migrations,sig-storage,storage-req) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-compute-conformance ]]; then
     label_filter='(sig-compute && conformance)'
+  elif [[ $TARGET =~ sig-compute-dra-gpu ]]; then
+    export KUBEVIRT_E2E_PARALLEL=false
+    label_filter='(DRA-GPU)'
   elif [[ $TARGET =~ sig-compute ]]; then
-    label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations,sig-storage) && !(SEV, SEVES, secure-execution))'
+    label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations,sig-storage,DRA-GPU) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-monitoring ]]; then
     label_filter='(sig-monitoring)'
   elif [[ $TARGET =~ sig-operator ]]; then
@@ -538,6 +581,8 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
       label_filter='(sig-operator)'
     fi
   elif [[ $TARGET =~ sriov.* ]]; then
+    label_filter='(SRIOV)'
+  elif [[ $TARGET =~ emulated-igb ]]; then
     label_filter='(SRIOV)'
   elif [[ $TARGET =~ gpu.* ]]; then
     label_filter='(GPU)'
@@ -561,6 +606,10 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
 
   if [[ ! $TARGET =~ wg-arm64 ]]; then
     add_to_label_filter "(!requires-arm64)" "&&"
+  fi
+
+  if [[ ${KUBEVIRT_CROSS_ARCH_EMULATION} != "true" ]]; then
+    add_to_label_filter "(!requires-cross-arch-emulation)" "&&"
   fi
 
   if [[ $KUBEVIRT_PROVIDER =~ k8s-1\.3[1-4] ]]; then
@@ -649,6 +698,21 @@ spec:
     - nfsvers=4.1
   storageClassName: rhel
 EOF
+fi
+
+if [[ $TARGET =~ sig-storage ]]; then
+  # sig-storage cares about persistent reservation, others don't
+  kubectl patch -n ${namespace} kv kubevirt --type merge -p '
+  {
+    "spec": {
+      "configuration": {
+        "persistentReservationConfiguration": {
+          "enabled": true
+        }
+      }
+    }
+  }'
+  kubectl wait -n ${namespace} kv kubevirt --for condition=Available --timeout 5m
 fi
 
 

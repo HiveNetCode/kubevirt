@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
@@ -79,6 +79,10 @@ func (s *VMSnapshotSource) ServicePorts() []corev1.ServicePort {
 }
 
 func (s *VMSnapshotSource) ConfigurePod(pod *corev1.Pod) {
+	pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "EXPORT_VM_DEF_URI",
+		Value: manifestsPath,
+	})
 	s.sourceVolumes.configurePodVolumes(pod)
 }
 

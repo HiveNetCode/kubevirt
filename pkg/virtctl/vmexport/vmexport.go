@@ -41,14 +41,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	kubectlutil "k8s.io/kubectl/pkg/util"
 
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
+	templateapi "kubevirt.io/virt-template-api/core"
 
 	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	"kubevirt.io/kubevirt/pkg/pointer"
@@ -73,6 +75,7 @@ const (
 	DELETE_FLAG            = "--delete-vme"
 	FORMAT_FLAG            = "--format"
 	PVC_FLAG               = "--pvc"
+	VMTEMPLATE_FLAG        = "--vmtemplate"
 	TTL_FLAG               = "--ttl"
 	MANIFEST_FLAG          = "--manifest"
 	OUTPUT_FORMAT_FLAG     = "--manifest-output-format"
@@ -92,6 +95,7 @@ const (
 	// Possible output format for volumes
 	GZIP_FORMAT = "gzip"
 	RAW_FORMAT  = "raw"
+	OCI_FORMAT  = "oci"
 
 	ACCEPT           = "Accept"
 	APPLICATION_YAML = "application/yaml"
@@ -112,7 +116,7 @@ const (
 	// ErrIncompatibleFlag serves as error message when an incompatible flag is used
 	ErrIncompatibleFlag = "the '%s' flag is incompatible with '%s'"
 	// ErrRequiredExportType serves as error message when no export kind is provided
-	ErrRequiredExportType = "need to specify export kind when attempting to create a VirtualMachineExport [--pvc|--vm|--snapshot]"
+	ErrRequiredExportType = "need to specify export kind when attempting to create a VirtualMachineExport [--pvc|--vm|--snapshot|--vmtemplate]"
 	// ErrIncompatibleExportType serves as error message when an export kind is provided with an incompatible argument
 	ErrIncompatibleExportType = "should not specify export kind"
 	// ErrIncompatibleExportTypeManifest serves as error message when a PVC kind is defined when getting manifest
@@ -129,6 +133,7 @@ var (
 	vm                   string
 	snapshot             string
 	pvc                  string
+	vmtemplate           string
 	outputFile           string
 	insecure             bool
 	keepVme              bool
@@ -242,7 +247,8 @@ func NewVirtualMachineExportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&vm, "vm", "", "Sets VirtualMachine as vmexport kind and specifies the vm name.")
 	cmd.Flags().StringVar(&snapshot, "snapshot", "", "Sets VirtualMachineSnapshot as vmexport kind and specifies the snapshot name.")
 	cmd.Flags().StringVar(&pvc, "pvc", "", "Sets PersistentVolumeClaim as vmexport kind and specifies the PVC name.")
-	cmd.MarkFlagsMutuallyExclusive("vm", "snapshot", "pvc")
+	cmd.Flags().StringVar(&vmtemplate, "vmtemplate", "", "Sets VirtualMachineTemplate as vmexport kind and specifies the template name.")
+	cmd.MarkFlagsMutuallyExclusive("vm", "snapshot", "pvc", "vmtemplate")
 	cmd.Flags().StringVar(&outputFile, "output", "", "Specifies the output path of the volume to be downloaded.")
 	cmd.Flags().StringVar(&volumeName, "volume", "", "Specifies the volume to be downloaded.")
 	cmd.Flags().StringVar(&format, "format", "", "Used to specify the format of the downloaded image. There's two options: gzip (default) and raw.")
@@ -459,7 +465,7 @@ func CreateVirtualMachineExport(client kubecli.KubevirtClient, vmeInfo *VMExport
 		return err
 	}
 
-	printToOutput("VirtualMachineExport '%s/%s' created succesfully\n", vmeInfo.Namespace, vmeInfo.Name)
+	printToOutput("VirtualMachineExport '%s/%s' created successfully\n", vmeInfo.Namespace, vmeInfo.Name)
 	return nil
 }
 
@@ -473,7 +479,7 @@ func DeleteVirtualMachineExport(client kubecli.KubevirtClient, vmeInfo *VMExport
 		return nil
 	}
 
-	printToOutput("VirtualMachineExport '%s/%s' deleted succesfully\n", vmeInfo.Namespace, vmeInfo.Name)
+	printToOutput("VirtualMachineExport '%s/%s' deleted successfully\n", vmeInfo.Namespace, vmeInfo.Name)
 	return nil
 }
 
@@ -492,7 +498,7 @@ func DownloadVirtualMachineExport(client kubecli.KubevirtClient, vmeInfo *VMExpo
 			time.Sleep(2 * time.Second)
 		}
 	}
-	return fmt.Errorf("retry count reached, exiting unsuccesfully")
+	return fmt.Errorf("retry count reached, exiting unsuccessfully")
 }
 
 func downloadVirtualMachineExport(client kubecli.KubevirtClient, vmeInfo *VMExportInfo) (bool, error) {
@@ -583,10 +589,30 @@ func getVirtualMachineManifest(client kubecli.KubevirtClient, vmexport *exportv1
 
 // downloadVolume handles the process of downloading the requested volume from a VirtualMachineExport
 func downloadVolume(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport, vmeInfo *VMExportInfo) (bool, error) {
-	// Extract the URL from the vmexport
-	downloadUrl, err := GetUrlFromVirtualMachineExport(vmexport, vmeInfo)
-	if err != nil {
-		return false, err
+	var downloadUrl string
+	var err error
+
+	if format == OCI_FORMAT {
+		switch vmexport.Spec.Source.Kind {
+		case "VirtualMachine", "VirtualMachineSnapshot", "VirtualMachineTemplate":
+		default:
+			return false, fmt.Errorf("OCI export is not supported for %q sources", vmexport.Spec.Source.Kind)
+		}
+		manifestUrls, err := GetManifestUrlsFromVirtualMachineExport(vmexport, vmeInfo)
+		if err != nil {
+			return false, err
+		}
+		ociUrl, ok := manifestUrls[exportv1.OCI]
+		if !ok {
+			return false, fmt.Errorf("OCI export format not available for '%s/%s'", vmexport.Namespace, vmexport.Name)
+		}
+		downloadUrl = ociUrl
+		vmeInfo.Decompress = false
+	} else {
+		downloadUrl, err = GetUrlFromVirtualMachineExport(vmexport, vmeInfo)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	resp, err := HandleHTTPGetRequestFn(client, vmexport, downloadUrl, vmeInfo.Insecure, vmeInfo.ServiceURL, nil)
@@ -606,7 +632,7 @@ func downloadVolume(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMac
 		return false, err
 	}
 
-	printToOutput("Download finished succesfully\n")
+	printToOutput("Download finished successfully\n")
 
 	return true, nil
 }
@@ -898,13 +924,21 @@ func getExportSource() k8sv1.TypedLocalObjectReference {
 			Name:     pvc,
 		}
 	}
+	if vmtemplate != "" {
+		apiGroup := templateapi.GroupName
+		exportSource = k8sv1.TypedLocalObjectReference{
+			APIGroup: &apiGroup,
+			Kind:     "VirtualMachineTemplate",
+			Name:     vmtemplate,
+		}
+	}
 
 	return exportSource
 }
 
 // handleCreateFlags ensures that only compatible flag combinations are used with 'create'
 func handleCreateFlags() error {
-	if vm == "" && snapshot == "" && pvc == "" {
+	if vm == "" && snapshot == "" && pvc == "" && vmtemplate == "" {
 		return fmt.Errorf(ErrRequiredExportType)
 	}
 
@@ -944,7 +978,7 @@ func handleCreateFlags() error {
 
 // handleDeleteFlags ensures that only compatible flag combinations are used with 'delete'
 func handleDeleteFlags() error {
-	if vm != "" || snapshot != "" || pvc != "" {
+	if vm != "" || snapshot != "" || pvc != "" || vmtemplate != "" {
 		return fmt.Errorf(ErrIncompatibleExportType)
 	}
 
@@ -994,7 +1028,7 @@ func handleDeleteFlags() error {
 // handleDownloadFlags ensures that only compatible flag combinations are used with 'download'
 func handleDownloadFlags() error {
 	// We assume that the vmexport should be created if a source has been specified
-	if hasSource := vm != "" || snapshot != "" || pvc != ""; hasSource {
+	if hasSource := vm != "" || snapshot != "" || pvc != "" || vmtemplate != ""; hasSource {
 		shouldCreate = true
 	}
 
@@ -1005,8 +1039,20 @@ func handleDownloadFlags() error {
 		}
 	}
 
-	if format != "" && format != GZIP_FORMAT && format != RAW_FORMAT {
-		return fmt.Errorf(ErrInvalidValue, FORMAT_FLAG, "gzip/raw")
+	if format != "" && format != GZIP_FORMAT && format != RAW_FORMAT && format != OCI_FORMAT {
+		return fmt.Errorf(ErrInvalidValue, FORMAT_FLAG, "gzip/raw/oci")
+	}
+
+	if format == OCI_FORMAT {
+		if volumeName != "" {
+			return fmt.Errorf(ErrIncompatibleFlag, VOLUME_FLAG, FORMAT_FLAG+"=oci")
+		}
+		if exportManifest {
+			return fmt.Errorf(ErrIncompatibleFlag, MANIFEST_FLAG, FORMAT_FLAG+"=oci")
+		}
+		if pvc != "" {
+			return fmt.Errorf(ErrIncompatibleFlag, PVC_FLAG, FORMAT_FLAG+"=oci")
+		}
 	}
 
 	if downloadRetries < 0 {
@@ -1162,11 +1208,16 @@ func RunPortForward(client kubecli.KubevirtClient, pod k8sv1.Pod, namespace stri
 		SubResource("portforward")
 
 	// Set up the port forwarding options
-	transport, upgrader, err := spdy.RoundTripperFor(client.Config())
+	spdyTransport, upgrader, err := spdy.RoundTripperFor(client.Config())
 	if err != nil {
 		log.Fatalf("Failed to set up transport: %v", err)
 	}
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
+	spdyDialer := spdy.NewDialer(upgrader, &http.Client{Transport: spdyTransport}, "POST", req.URL())
+	wsDialer, err := portforward.NewSPDYOverWebsocketDialer(req.URL(), client.Config())
+	if err != nil {
+		log.Fatalf("Failed to set up websocket transport: %v", err)
+	}
+	dialer := portforward.NewFallbackDialer(wsDialer, spdyDialer, httpstream.IsUpgradeFailure)
 
 	// Start port-forwarding
 	fw, err := portforward.New(dialer, ports, stopChan, readyChan, os.Stderr, os.Stderr)

@@ -303,10 +303,10 @@ var _ = Describe("Preference.Devices", func() {
 				[]virtv1.PanicDevice{{Model: pointer.P(virtv1.Hyperv)}},
 				[]virtv1.PanicDevice{{Model: pointer.P(virtv1.Hyperv)}},
 			),
-			Entry("not apply when panic devices is not provided in the VMI spec",
+			Entry("create a panic device when none are provided in the VMI spec",
 				pointer.P(virtv1.Hyperv),
 				[]virtv1.PanicDevice{},
-				[]virtv1.PanicDevice{},
+				[]virtv1.PanicDevice{{Model: pointer.P(virtv1.Hyperv)}},
 			),
 			Entry("only apply when  panic device model is nil for a panic device provided in the VMI spec",
 				pointer.P(virtv1.Isa),
@@ -316,6 +316,42 @@ var _ = Describe("Preference.Devices", func() {
 					{Model: pointer.P(virtv1.Isa)},
 					{Model: pointer.P(virtv1.PanicDeviceModel(""))},
 				},
+			),
+		)
+	})
+
+	Context("PreferredVideoType", func() {
+		DescribeTable("should",
+			func(preferredVideoType *string, vmiVideo, expectedVideo *virtv1.VideoDevice) {
+				vmi.Spec.Domain.Devices.Video = vmiVideo
+				preferenceSpec.Devices.PreferredVideoType = preferredVideoType
+				Expect(vmiApplier.ApplyToVMI(field, instancetypeSpec, preferenceSpec, &vmi.Spec, &vmi.ObjectMeta)).To(Succeed())
+				Expect(vmi.Spec.Domain.Devices.Video).To(Equal(expectedVideo))
+			},
+			Entry("only apply when video device type is empty within VMI spec",
+				pointer.P("virtio"),
+				&virtv1.VideoDevice{},
+				&virtv1.VideoDevice{Type: "virtio"},
+			),
+			Entry("not apply when video device type is already set within VMI spec",
+				pointer.P("virtio"),
+				&virtv1.VideoDevice{Type: "vga"},
+				&virtv1.VideoDevice{Type: "vga"},
+			),
+			Entry("create video device and apply when video device is not provided in the VMI spec",
+				pointer.P("virtio"),
+				nil,
+				&virtv1.VideoDevice{Type: "virtio"},
+			),
+			Entry("not apply when preferredVideoType is nil",
+				nil,
+				&virtv1.VideoDevice{},
+				&virtv1.VideoDevice{},
+			),
+			Entry("not apply when preferredVideoType is nil and video device is nil",
+				nil,
+				nil,
+				nil,
 			),
 		)
 	})

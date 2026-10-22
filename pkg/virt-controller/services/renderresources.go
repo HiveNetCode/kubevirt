@@ -162,10 +162,10 @@ func WithGPUsDevicePlugins(gpus []v1.GPU) ResourceRendererOption {
 func WithGPUsDRA(gpus []v1.GPU) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
 		for _, g := range gpus {
-			if g.DeviceName == "" && g.ClaimRequest != nil && g.ClaimRequest.ClaimName != nil && g.ClaimRequest.RequestName != nil {
+			if g.DeviceName == "" && g.ClaimRequest != nil {
 				claim := k8sv1.ResourceClaim{
-					Name:    *g.ClaimRequest.ClaimName,
-					Request: *g.ClaimRequest.RequestName,
+					Name:    g.ClaimRequest.ClaimName,
+					Request: g.ClaimRequest.RequestName,
 				}
 				r.resourceClaims = append(r.resourceClaims, claim)
 			}
@@ -191,10 +191,25 @@ func WithHostDevicesDevicePlugins(hostDevices []v1.HostDevice) ResourceRendererO
 func WithHostDevicesDRA(hostDevices []v1.HostDevice) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
 		for _, hd := range hostDevices {
-			if hd.DeviceName == "" && hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil && hd.ClaimRequest.RequestName != nil {
+			if hd.DeviceName == "" && hd.ClaimRequest != nil {
 				claim := k8sv1.ResourceClaim{
-					Name:    *hd.ClaimRequest.ClaimName,
-					Request: *hd.ClaimRequest.RequestName,
+					Name:    hd.ClaimRequest.ClaimName,
+					Request: hd.ClaimRequest.RequestName,
+				}
+				r.resourceClaims = append(r.resourceClaims, claim)
+			}
+		}
+	}
+}
+
+// WithNetworksDRA adds ResourceClaims for Networks provisioned via DRA.
+func WithNetworksDRA(networks []v1.Network) ResourceRendererOption {
+	return func(r *ResourceRenderer) {
+		for _, net := range networks {
+			if netvmispec.IsDRANetwork(net) {
+				claim := k8sv1.ResourceClaim{
+					Name:    net.NetworkSource.ResourceClaim.ClaimName,
+					Request: net.NetworkSource.ResourceClaim.RequestName,
 				}
 				r.resourceClaims = append(r.resourceClaims, claim)
 			}
@@ -267,7 +282,8 @@ func WithMemoryRequests(vmiSpecMemory *v1.Memory, overcommit int) ResourceRender
 		}
 
 		if memory != nil && memory.Value() > 0 {
-			if overcommit == 100 {
+			hugepages := vmiSpecMemory != nil && vmiSpecMemory.Hugepages != nil
+			if overcommit == 100 || hugepages {
 				renderer.vmRequests[k8sv1.ResourceMemory] = *memory
 			} else {
 				value := (memory.Value() * int64(100)) / int64(overcommit)
@@ -367,10 +383,28 @@ func WithSEV() ResourceRendererOption {
 	}
 }
 
+func WithTDX() ResourceRendererOption {
+	return func(renderer *ResourceRenderer) {
+		resources := renderer.ResourceRequirements()
+		requestResource(&resources, TdxDevice)
+		copyResources(resources.Limits, renderer.calculatedLimits)
+		copyResources(resources.Requests, renderer.calculatedRequests)
+	}
+}
+
 func WithPersistentReservation() ResourceRendererOption {
 	return func(renderer *ResourceRenderer) {
 		resources := renderer.ResourceRequirements()
 		requestResource(&resources, PrDevice)
+		copyResources(resources.Limits, renderer.calculatedLimits)
+		copyResources(resources.Requests, renderer.calculatedRequests)
+	}
+}
+
+func WithIOMMUFD() ResourceRendererOption {
+	return func(renderer *ResourceRenderer) {
+		resources := renderer.ResourceRequirements()
+		requestResource(&resources, IOMMUFDDevice)
 		copyResources(resources.Limits, renderer.calculatedLimits)
 		copyResources(resources.Requests, renderer.calculatedRequests)
 	}
@@ -472,15 +506,20 @@ func validatePermittedHostDevices(spec *v1.VirtualMachineInstanceSpec, config *v
 		for _, dev := range hostDevs.USB {
 			supportedHostDevicesMap[dev.ResourceName] = true
 		}
-		//TODO @alayp: add proper validation for DRA GPUs in beta
-		if !config.GPUsWithDRAGateEnabled() {
-			for _, hostDev := range spec.Domain.Devices.GPUs {
-				if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
-					errors = append(errors, fmt.Sprintf("GPU %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
-				}
+		for _, hostDev := range spec.Domain.Devices.GPUs {
+			// skip GPU devices backed by DRA claims, since they are validated via DRA instead of the permittedHostDevices config
+			if config.GPUsWithDRAGateEnabled() && hostDev.ClaimRequest != nil {
+				continue
+			}
+			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
+				errors = append(errors, fmt.Sprintf("GPU %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
 			}
 		}
 		for _, hostDev := range spec.Domain.Devices.HostDevices {
+			// skip host devices backed by DRA claims, since they are validated via DRA instead of the permittedHostDevices config
+			if config.HostDevicesWithDRAEnabled() && hostDev.ClaimRequest != nil {
+				continue
+			}
 			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
 				errors = append(errors, fmt.Sprintf("HostDevice %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
 			}

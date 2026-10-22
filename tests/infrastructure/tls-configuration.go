@@ -34,9 +34,8 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 
 	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
-	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
+	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/flags"
-	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/libkubevirt"
 	"kubevirt.io/kubevirt/tests/libkubevirt/config"
@@ -51,10 +50,6 @@ var _ = Describe(SIGSerial("tls configuration", func() {
 	}
 
 	BeforeEach(func() {
-		if !checks.HasFeature(featuregate.VMExportGate) {
-			Fail(fmt.Sprintf(`Cluster has the %q featuregate disabled, skipping  the tests`, featuregate.VMExportGate))
-		}
-
 		kvConfig := libkubevirt.GetCurrentKv(kubevirt.Client()).Spec.Configuration.DeepCopy()
 		kvConfig.TLSConfiguration = &v1.TLSConfiguration{
 			MinTLSVersion: v1.VersionTLS12,
@@ -66,18 +61,16 @@ var _ = Describe(SIGSerial("tls configuration", func() {
 		Expect(newKv.Spec.Configuration.TLSConfiguration.Ciphers).To(BeEquivalentTo([]string{cipher.Name}))
 	})
 
-	It("[test_id:9306]should result only connections with the correct client-side tls configurations are accepted by the components", func() {
-		podsToTest := listPods("kubevirt.io=virt-api", "kubevirt.io=virt-handler", "kubevirt.io=virt-exportproxy")
+	It("[test_id:9306]should result only connections with the correct client-side tls configurations are accepted by the components",
+		decorators.WgS390x, func() {
+			podsToTest := listPods("kubevirt.io=virt-api", "kubevirt.io=virt-handler", "kubevirt.io=virt-exportproxy")
 
-		By("Verifying TLS connections to kubevirt pods")
-		const kubevirtPodTLSPort = 8443
-		verifyTLSEnforcement(podsToTest, kubevirtPodTLSPort, cipher)
-	})
+			By("Verifying TLS connections to kubevirt pods")
+			const kubevirtPodTLSPort = 8443
+			verifyTLSEnforcement(podsToTest, kubevirtPodTLSPort, cipher)
+		})
 
 	It("should enforce TLS configuration on virt-template components", func() {
-		By("Enabling the Template feature gate")
-		config.EnableFeatureGate(featuregate.Template)
-
 		podsToTest := listPods(
 			"app.kubernetes.io/name=virt-template,control-plane=apiserver",
 			"app.kubernetes.io/name=virt-template,control-plane=controller-manager",
@@ -104,12 +97,12 @@ func listPods(labelSelectors ...string) []k8sv1.Pod {
 
 func verifyTLSEnforcement(pods []k8sv1.Pod, containerPort int, cipher *tls.CipherSuite) {
 	for i := range pods {
-		func(i int, pod *k8sv1.Pod) {
+		func(pod *k8sv1.Pod) {
 			stopChan := make(chan struct{})
 			defer close(stopChan)
 			const expectTimeout = 10 * time.Second
-			localPort := 8440 + i
-			Expect(libpod.ForwardPorts(pod, []string{fmt.Sprintf("%d:%d", localPort, containerPort)}, stopChan, expectTimeout)).To(Succeed())
+			localPort, fwErr := libpod.ForwardPorts(pod, []string{fmt.Sprintf("0:%d", containerPort)}, stopChan, expectTimeout)
+			Expect(fwErr).ToNot(HaveOccurred())
 
 			acceptedTLSConfig := &tls.Config{
 				//nolint:gosec
@@ -117,9 +110,11 @@ func verifyTLSEnforcement(pods []k8sv1.Pod, containerPort int, cipher *tls.Ciphe
 				MaxVersion:         tls.VersionTLS12,
 				CipherSuites:       kvtls.CipherSuiteIds([]string{cipher.Name}),
 			}
-			conn, err := tls.Dial("tcp", fmt.Sprintf("localhost:%d", localPort), acceptedTLSConfig)
-			Expect(conn).ToNot(BeNil(), fmt.Sprintf("Pod %s should accept valid tls config, %s", pod.Name, err))
+			rawConn, err := (&tls.Dialer{Config: acceptedTLSConfig}).DialContext(context.Background(), "tcp", fmt.Sprintf("localhost:%d", localPort))
+			Expect(rawConn).ToNot(BeNil(), fmt.Sprintf("Pod %s should accept valid tls config, %s", pod.Name, err))
 			Expect(err).ToNot(HaveOccurred(), "Pod %s should accept valid tls config", pod.Name)
+			conn, ok := rawConn.(*tls.Conn)
+			Expect(ok).To(BeTrue())
 			Expect(conn.ConnectionState().Version).To(BeEquivalentTo(tls.VersionTLS12), "Configured TLS version should be used for pod %s", pod.Name)
 			Expect(conn.ConnectionState().CipherSuite).To(BeEquivalentTo(cipher.ID), "Configured cipher should be used for pod %s", pod.Name)
 
@@ -128,14 +123,14 @@ func verifyTLSEnforcement(pods []k8sv1.Pod, containerPort int, cipher *tls.Ciphe
 				InsecureSkipVerify: true,
 				MaxVersion:         tls.VersionTLS11,
 			}
-			conn, err = tls.Dial("tcp", fmt.Sprintf("localhost:%d", localPort), rejectedTLSConfig)
+			rawConn, err = (&tls.Dialer{Config: rejectedTLSConfig}).DialContext(context.Background(), "tcp", fmt.Sprintf("localhost:%d", localPort))
 			Expect(err).To(HaveOccurred())
-			Expect(conn).To(BeNil())
+			Expect(rawConn).To(BeNil())
 			Expect(err.Error()).To(SatisfyAny(
 				BeEquivalentTo("remote error: tls: protocol version not supported"),
 				// The error message changed with the golang 1.19 update
 				BeEquivalentTo("tls: no supported versions satisfy MinVersion and MaxVersion"),
 			))
-		}(i, &pods[i])
+		}(&pods[i])
 	}
 }

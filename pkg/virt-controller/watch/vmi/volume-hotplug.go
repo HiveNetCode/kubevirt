@@ -84,10 +84,15 @@ func (c *Controller) cleanupAttachmentPods(currentPod *k8sv1.Pod, oldPods []*k8s
 		}
 	}
 
+	specAttachmentVolumes := make(map[string]struct{})
 	for _, vmiVolume := range vmi.Spec.Volumes {
 		if storagetypes.IsHotplugVolume(&vmiVolume) {
+			specAttachmentVolumes[vmiVolume.Name] = struct{}{}
 			delete(statusMap, vmiVolume.Name)
 		}
+	}
+	for _, utilityVolume := range vmi.Spec.UtilityVolumes {
+		specAttachmentVolumes[utilityVolume.Name] = struct{}{}
 	}
 
 	currentPodIsNotRunning := currentPod == nil || currentPod.Status.Phase != k8sv1.PodRunning
@@ -95,13 +100,20 @@ func (c *Controller) cleanupAttachmentPods(currentPod *k8sv1.Pod, oldPods []*k8s
 		if !foundRunning &&
 			attachmentPod.Status.Phase == k8sv1.PodRunning && attachmentPod.DeletionTimestamp == nil &&
 			numReadyVolumes > 0 &&
-			currentPodIsNotRunning {
+			currentPodIsNotRunning &&
+			podContainsVolumesToPreserve(attachmentPod, statusMap, specAttachmentVolumes) {
 			foundRunning = true
 			continue
 		}
 		volumesNotReadyForDelete := 0
 
 		for _, podVolume := range attachmentPod.Spec.Volumes {
+			if podVolume.PersistentVolumeClaim == nil {
+				continue
+			}
+			if volumeHandledByCurrentPod(podVolume.Name, currentPod, specAttachmentVolumes) {
+				continue
+			}
 			volumeStatus, ok := statusMap[podVolume.Name]
 			if ok && !volumeReadyForPodDelete(volumeStatus.Phase) {
 				volumesNotReadyForDelete++
@@ -130,6 +142,62 @@ func volumeReadyForPodDelete(phase v1.VolumePhase) bool {
 		return false
 	}
 	return true
+}
+
+func volumeHandledByCurrentPod(volumeName string, currentPod *k8sv1.Pod, specAttachmentVolumes map[string]struct{}) bool {
+	if currentPod == nil || currentPod.Status.Phase != k8sv1.PodRunning {
+		return false
+	}
+	if _, inSpec := specAttachmentVolumes[volumeName]; !inSpec {
+		return false
+	}
+	volumeInPodSpec := false
+	for _, podVolume := range currentPod.Spec.Volumes {
+		if podVolume.PersistentVolumeClaim != nil && podVolume.Name == volumeName {
+			volumeInPodSpec = true
+			break
+		}
+	}
+	if !volumeInPodSpec {
+		return false
+	}
+	return podVolumeExposedToContainer(currentPod, volumeName)
+}
+
+func podVolumeExposedToContainer(pod *k8sv1.Pod, volumeName string) bool {
+	if len(pod.Spec.Containers) == 0 {
+		return false
+	}
+	container := pod.Spec.Containers[0]
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == volumeName {
+			return true
+		}
+	}
+	for _, device := range container.VolumeDevices {
+		if device.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// podContainsVolumesToPreserve returns true if the pod contains at least one
+// hotplug volume that justifies keeping the pod alive as a fallback:
+// - A volume still in the VMI spec (the VMI needs it until the new pod is Running)
+// - A volume being detached but whose phase still blocks pod deletion
+// An old pod whose hotplug volumes are all in Detaching/UnMounted phase provides
+// no fallback value and should not block PVC cleanup on other VMIs.
+func podContainsVolumesToPreserve(pod *k8sv1.Pod, statusMap map[string]v1.VolumeStatus, specHotplugVolumes map[string]struct{}) bool {
+	for _, podVol := range pod.Spec.Volumes {
+		if _, inSpec := specHotplugVolumes[podVol.Name]; inSpec {
+			return true
+		}
+		if vs, ok := statusMap[podVol.Name]; ok && !volumeReadyForPodDelete(vs.Phase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Controller) isUtilityVolumeWithBlockPVC(vmi *v1.VirtualMachineInstance, volume *v1.Volume) (bool, error) {

@@ -23,6 +23,7 @@ var (
 
 	GPU             = Label("GPU")
 	VGPU            = Label("VGPU")
+	DRAGPU          = Label("DRA-GPU")
 	SEV             = Label("SEV")
 	SEVES           = Label("SEVES")
 	SEVSNP          = Label("SEVSNP")
@@ -44,7 +45,8 @@ var (
 
 	CPUModel                             = Label("cpumodel")
 	VSOCK                                = Label("vsock")
-	VirtioFS                             = Label("virtiofs")
+	ConfigVolumesVirtiofs                = Label("config-volumes-virtiofs")
+	StorageVolumesVirtiofs               = Label("storage-volumes-virtiofs")
 	Sysprep                              = Label("Sysprep")
 	Windows                              = Label("Windows")
 	Networking                           = Label("Networking")
@@ -59,6 +61,9 @@ var (
 	InPlaceHotplugNICs                   = Label("in-place-hotplug-NICs")
 	MigrationBasedHotplugNICs            = Label("migration-based-hotplug-NICs")
 	NetCustomBindingPlugins              = Label("netCustomBindingPlugins")
+	InterfacePorts                       = Label("interface-ports")
+	NetworkCIDR                          = Label("network-cidr")
+	IPv6                                 = Label("IPv6")
 	RequiresTwoSchedulableNodes          = Label("requires-two-schedulable-nodes")
 	RequiresThreeSchedulableNodes        = Label("requires-three-schedulable-nodes")
 	RequiresDedicatedWorkerNodes         = Label("requires-dedicated-worker-nodes")
@@ -70,7 +75,6 @@ var (
 	RequiresHugepages2Mi                 = Label("requireHugepages2Mi")
 	RequiresHugepages1Gi                 = Label("requireHugepages1Gi")
 	GuestAgentProbes                     = Label("guest-agent-probes")
-	Passt                                = Label("passt")
 	ImageVolume                          = Label("ImageVolume")
 	RebootPolicy                         = Label("RebootPolicy")
 
@@ -90,6 +94,10 @@ var (
 	RequiresRWOFsVMStateStorageClass = Label("RequiresRWOFsVMStateStorageClass")
 	// RequiresRWXFsVMStateStorageClass requires the VMStateStorageClass to be set to ReadWriteMany Filesystem storage class
 	RequiresRWXFsVMStateStorageClass = Label("RequiresRWXFsVMStateStorageClass")
+	// RequiresPersistentReservation requires the Persistent Reservation to be enabled on the kubevirt level
+	RequiresPersistentReservation = Label("RequiresPersistentReservation")
+	// RequiresPlugins requires the Plugins feature gate to be enabled on the kubevirt level
+	RequiresPlugins = Label("RequiresPlugins")
 
 	// RequiresBlockStorage requires a storage class with Block storage support
 	RequiresBlockStorage = Label("RequiresBlockStorage")
@@ -105,6 +113,9 @@ var (
 	// RequiresSizeRoundUp requires a provisioner that rounds up the size of the volume
 	RequiresSizeRoundUp = Label("RequiresSizeRoundUp")
 
+	// RequiresDiscardSupport requires a storage backend that supports discard/TRIM.
+	RequiresDiscardSupport = Label("RequiresDiscardSupport")
+
 	/* architecture working groups */
 
 	WgS390x = Label("wg-s390x")
@@ -114,11 +125,23 @@ var (
 	RequiresS390X = Label("requires-s390x")
 	RequiresARM64 = Label("requires-arm64")
 
+	RequiresCrossArchEmulation = Label("requires-cross-arch-emulation")
+
 	// Virtctl related tests
 	Virtctl = Label("virtctl")
 
-	// NoFlakeCheck decorates tests that are not compatible with the check-tests-for-flakes test lane.
-	// This should only be used for legitimate purposes, like on tests that have a flake-checker-friendly clone.
+	// NoFlakeCheck decorates tests that are not compatible with the
+	// check-tests-for-flakes test lane due to infrastructure constraints
+	// (e.g. missing storage classes, special hardware requirements).
+	//
+	// This decorator must NOT be used on tests that are flaky — flaky tests
+	// must be quarantined instead (see docs/quarantine.md).
+	//
+	// When applying this decorator, authors must document the reason in the
+	// commit message or an inline comment explaining why the test cannot run
+	// on the flake-check lane.
+	//
+	// See also: https://groups.google.com/g/kubevirt-dev/c/7z5TXJwmcrs
 	NoFlakeCheck = Label("no-flake-check")
 	// FlakeCheck decorates tests that are dedicated to the check-tests-for-flakes test lane.
 	FlakeCheck = Label("flake-check")

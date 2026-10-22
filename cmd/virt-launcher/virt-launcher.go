@@ -49,6 +49,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/hooks"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
+	"kubevirt.io/kubevirt/pkg/storage/nbdclient"
 	putil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
@@ -57,7 +58,9 @@ import (
 	notifyclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
 	premigrationhookserver "kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server/cpuhook"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server/disk"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server/network"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server/vgpuhook"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/standalone"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
 	agentpoller "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent-poller"
@@ -352,13 +355,17 @@ func main() {
 	namespace := pflag.String("namespace", "", "Namespace of the VirtualMachineInstance")
 	gracePeriodSeconds := pflag.Int("grace-period-seconds", 30, "Grace period to observe before sending SIGTERM to vmi process")
 	allowEmulation := pflag.Bool("allow-emulation", false, "Allow use of software emulation as fallback")
+	allowCrossArchEmulation := pflag.Bool("allow-cross-arch-emulation", false, "Allow cross-architecture software emulation via QEMU TCG")
 	runWithNonRoot := pflag.Bool("run-as-nonroot", false, "Run virtqemud with the 'virt' user")
 	imageVolumeEnabled := pflag.Bool("image-volume", false, "Generated with ImageVolume instead of containerDisk") //remove this once ImageVolume is GAed
 	libvirtHooksServerAndClientEnabled := pflag.Bool("libvirt-hook-server-and-client", false, "Enable pre-migration hooks on the target virt-launcher pod")
 	ifacesOrdinalNamingUpgradeEnabled := pflag.Bool("upgrade-ordinal-ifaces", false, "Enable upgrade of ordinal ifaces naming scheme")
+	vGPUDedicatedHookEnabled := pflag.Bool("vgpu-dedicated-hook", false, "Enable target mdev UUID mutation for vGPU live migration")
+	vmStatsCollectorEnabled := pflag.Bool("vm-stats-collector", false, "Enable additional guest agent polling workers for VMStats monitoring data collection")
+	firmwareAutoSelectionEnabled := pflag.Bool("firmware-auto-selection", false, "Use libvirt firmware auto-selection for EFI Secure Boot")
 	hookSidecars := pflag.Uint("hook-sidecars", 0, "Number of requested hook sidecars, virt-launcher will wait for all of them to become available")
 	diskMemoryLimitBytes := pflag.Int64("disk-memory-limit", virtconfig.DefaultDiskVerificationMemoryLimitBytes, "Memory limit for disk verification")
-	ovmfPath := pflag.String("ovmf-path", "/usr/share/OVMF", "The directory that contains the EFI roms (like OVMF_CODE.fd)")
+	ovmfPath := pflag.String("ovmf-path", virtconfig.DefaultARCHOVMFPath, "The directory that contains the EFI roms (like OVMF_CODE.fd)")
 	qemuAgentSysInterval := pflag.Duration("qemu-agent-sys-interval", 120*time.Second, "Interval between consecutive qemu agent calls for sys commands")
 	qemuAgentFileInterval := pflag.Duration("qemu-agent-file-interval", 300*time.Second, "Interval between consecutive qemu agent calls for file command")
 	qemuAgentUserInterval := pflag.Duration("qemu-agent-user-interval", 10*time.Second, "Interval between consecutive qemu agent calls for user command")
@@ -442,16 +449,20 @@ func main() {
 
 	hookFuncs := []premigrationhookserver.HookFunc{
 		cpuhook.CPUDedicatedHook,
+		disk.DiskSourcePathHook,
 	}
 	if *ifacesOrdinalNamingUpgradeEnabled {
 		hookFuncs = append(hookFuncs, network.UpgradeOrdinalNamingScheme)
+	}
+	if *vGPUDedicatedHookEnabled {
+		hookFuncs = append(hookFuncs, vgpuhook.VGPULiveMigration)
 	}
 
 	preMigrationHookServer := premigrationhookserver.NewPreMigrationHookServer(
 		stopChan,
 		hookFuncs...,
 	)
-	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, *ephemeralDiskDir, &agentStore, *ovmfPath, ephemeralDiskCreator, metadataCache, signalStopChan, *diskMemoryLimitBytes, util.GetPodCPUSet, *imageVolumeEnabled, *libvirtHooksServerAndClientEnabled, preMigrationHookServer, *hypervisor)
+	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, *ephemeralDiskDir, &agentStore, *ovmfPath, ephemeralDiskCreator, metadataCache, signalStopChan, *diskMemoryLimitBytes, util.GetPodCPUSet, *imageVolumeEnabled, *libvirtHooksServerAndClientEnabled, preMigrationHookServer, *hypervisor, nbdclient.RegisterNBDServer, domainName, *vmStatsCollectorEnabled, *firmwareAutoSelectionEnabled, *allowCrossArchEmulation)
 	if err != nil {
 		panic(err)
 	}
@@ -466,7 +477,7 @@ func main() {
 	// Start the virt-launcher command service.
 	// Clients can use this service to tell virt-launcher
 	// to start/stop virtual machines
-	options := cmdserver.NewServerOptions(*allowEmulation)
+	options := cmdserver.NewServerOptions(*allowEmulation).WithVMStatsCollector(*vmStatsCollectorEnabled).WithNotifier(notifier).WithVMI(vmi)
 	cmdclient.SetBaseDir(*virtShareDir)
 	cmdServerDone := startCmdServer(cmdclient.UninitializedSocketOnGuest(), domainManager, stopChan, options)
 

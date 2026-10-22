@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gstruct"
 	"go.uber.org/mock/gomock"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	k8sv1 "k8s.io/api/core/v1"
@@ -56,8 +56,6 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/matcher"
 
 	gomegatypes "github.com/onsi/gomega/types"
-
-	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	libvmistatus "kubevirt.io/kubevirt/pkg/libvmi/status"
@@ -3213,7 +3211,9 @@ var _ = Describe("VirtualMachine", func() {
 		Context("dynamic annotations and labels", func() {
 			const selectedAnnotationKey = descheduler.EvictPodAnnotationKeyAlphaPreferNoEviction
 			const customSyncAnnotation = "custom/annotation"
+			const customSyncAnnotationPrefix = "custom/annotation-prefix/"
 			const customSyncLabel = "custom/label"
+			const customSyncLabelPrefix = "custom/label-prefix/"
 			const ignoredKey = "anotherKey"
 			const intitialValue = "initialValue"
 			const updatedValue = "updatedValue"
@@ -3305,10 +3305,48 @@ var _ = Describe("VirtualMachine", func() {
 					map[string]string{selectedAnnotationKey: intitialValue, customSyncAnnotation: customSyncAnnotation},
 					1,
 				),
+				Entry("should sync annotations matching wildcard prefixes",
+					[]string{customSyncAnnotationPrefix + "*"},
+					map[string]string{selectedAnnotationKey: intitialValue, customSyncAnnotationPrefix + "one": intitialValue},
+					map[string]string{
+						selectedAnnotationKey:              intitialValue,
+						customSyncAnnotationPrefix + "one": updatedValue,
+						customSyncAnnotationPrefix + "two": updatedValue,
+						ignoredKey:                         anotherValue,
+					},
+					map[string]string{
+						selectedAnnotationKey:              intitialValue,
+						customSyncAnnotationPrefix + "one": updatedValue,
+						customSyncAnnotationPrefix + "two": updatedValue,
+					},
+					1,
+				),
+				Entry("should remove annotations matching wildcard prefixes when absent in VM template",
+					[]string{customSyncAnnotationPrefix + "*"},
+					map[string]string{
+						selectedAnnotationKey:              intitialValue,
+						customSyncAnnotationPrefix + "one": intitialValue,
+						customSyncAnnotationPrefix + "two": intitialValue,
+					},
+					map[string]string{
+						selectedAnnotationKey: intitialValue,
+					},
+					map[string]string{
+						selectedAnnotationKey: intitialValue,
+					},
+					1,
+				),
+				Entry("should ignore bare '*' pattern and not sync any annotations",
+					[]string{"*"},
+					map[string]string{selectedAnnotationKey: intitialValue},
+					map[string]string{selectedAnnotationKey: intitialValue, ignoredKey: updatedValue},
+					map[string]string{selectedAnnotationKey: intitialValue},
+					0,
+				),
 			)
 
-			DescribeTable("should sync selected dynamic labels from spec.template to vmi", func(existingLabels, updatedVMLabels, expectedVMILabels map[string]string, numExpectedPatches int) {
-				controller.additionalLauncherLabelsSync = []string{customSyncLabel}
+			DescribeTable("should sync selected dynamic labels from spec.template to vmi", func(additionalLauncherLabelsSync []string, existingLabels, updatedVMLabels, expectedVMILabels map[string]string, numExpectedPatches int) {
+				controller.additionalLauncherLabelsSync = additionalLauncherLabelsSync
 
 				vm, vmi := watchtesting.DefaultVirtualMachine(true)
 				vm.Spec.Template.ObjectMeta.Labels = existingLabels
@@ -3337,32 +3375,75 @@ var _ = Describe("VirtualMachine", func() {
 
 			},
 				Entry("should copy selected custom labels from VM.spec.template.metadata.labels to VMI",
+					[]string{customSyncLabel},
 					map[string]string{customSyncLabel: intitialValue},
 					map[string]string{customSyncLabel: updatedValue},
 					map[string]string{customSyncLabel: updatedValue},
 					1,
 				),
 				Entry("should remove selected custom labels from VMI if missing in VM.spec.template.metadata.labels",
+					[]string{customSyncLabel},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: anotherValue},
 					map[string]string{ignoredKey: anotherValue},
 					map[string]string{ignoredKey: anotherValue},
 					1,
 				),
 				Entry("should do nothing if selected custom labels are already equal",
+					[]string{customSyncLabel},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: anotherValue},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: anotherValue},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: anotherValue},
 					0,
 				),
 				Entry("should update only custom selected labels",
+					[]string{customSyncLabel},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: anotherValue},
 					map[string]string{customSyncLabel: updatedValue, ignoredKey: updatedValue},
 					map[string]string{customSyncLabel: updatedValue, ignoredKey: anotherValue},
 					1,
 				),
 				Entry("should ignore other labels on VM.spec.template.metadata.labels",
+					[]string{customSyncLabel},
 					map[string]string{customSyncLabel: intitialValue},
 					map[string]string{customSyncLabel: intitialValue, ignoredKey: updatedValue},
+					map[string]string{customSyncLabel: intitialValue},
+					0,
+				),
+				Entry("should sync labels matching wildcard prefixes",
+					[]string{customSyncLabelPrefix + "*"},
+					map[string]string{
+						customSyncLabelPrefix + "one": intitialValue,
+					},
+					map[string]string{
+						customSyncLabelPrefix + "one": updatedValue,
+						customSyncLabelPrefix + "two": updatedValue,
+						ignoredKey:                    anotherValue,
+					},
+					map[string]string{
+						customSyncLabelPrefix + "one": updatedValue,
+						customSyncLabelPrefix + "two": updatedValue,
+					},
+					1,
+				),
+				Entry("should remove labels matching wildcard prefixes when absent in VM template",
+					[]string{customSyncLabelPrefix + "*"},
+					map[string]string{
+						customSyncLabelPrefix + "one": intitialValue,
+						customSyncLabelPrefix + "two": intitialValue,
+						ignoredKey:                    anotherValue,
+					},
+					map[string]string{
+						ignoredKey: anotherValue,
+					},
+					map[string]string{
+						ignoredKey: anotherValue,
+					},
+					1,
+				),
+				Entry("should ignore bare '*' pattern and not sync any labels",
+					[]string{"*"},
+					map[string]string{customSyncLabel: intitialValue},
+					map[string]string{customSyncLabel: updatedValue, ignoredKey: updatedValue},
 					map[string]string{customSyncLabel: intitialValue},
 					0,
 				),
@@ -4328,6 +4409,45 @@ var _ = Describe("VirtualMachine", func() {
 					Entry("PersistentVolumeClaim is in Pending phase", k8sv1.ClaimPending),
 					Entry("PersistentVolumeClaim is in Lost phase", k8sv1.ClaimLost),
 				)
+
+				It("Should NOT set WaitingForVolumeBinding when RerunOnFailure VM was stopped and PVC is unbound", func() {
+					err := virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Delete(context.TODO(), vm.Name, metav1.DeleteOptions{})
+					Expect(err).To(Succeed())
+
+					vm, _ = watchtesting.DefaultVirtualMachine(true)
+					vm.Spec.Running = nil
+					vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+					vm.Status.RunStrategy = v1.RunStrategyRerunOnFailure
+					vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
+						Name: "test1",
+						VolumeSource: v1.VolumeSource{
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "pvc1",
+							}},
+						},
+					})
+
+					vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm, metav1.CreateOptions{})
+					Expect(err).To(Succeed())
+					addVirtualMachine(vm)
+
+					pvc := k8sv1.PersistentVolumeClaim{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "pvc1",
+							Namespace: vm.Namespace,
+						},
+						Status: k8sv1.PersistentVolumeClaimStatus{
+							Phase: k8sv1.ClaimPending,
+						},
+					}
+					Expect(controller.pvcStore.Add(&pvc)).To(Succeed())
+
+					sanityExecute(vm)
+
+					vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
+					Expect(err).To(Succeed())
+					Expect(vm.Status.PrintableStatus).To(Equal(v1.VirtualMachineStatusStopped))
+				})
 
 			})
 
@@ -6020,7 +6140,73 @@ var _ = Describe("VirtualMachine", func() {
 					Expect(cond.Message).To(ContainSubstring("invalid volumes to update with migration:"))
 				})
 
-				DescribeTable("should return an error", func(dvExist bool, err error) {
+				migVols := func(src, dst string) []v1.StorageMigratedVolumeInfo {
+					return []v1.StorageMigratedVolumeInfo{{
+						VolumeName:         diskName,
+						SourcePVCInfo:      &v1.PersistentVolumeClaimInfo{ClaimName: src},
+						DestinationPVCInfo: &v1.PersistentVolumeClaimInfo{ClaimName: dst},
+					}}
+				}
+				migState := func(src, dst string) *v1.VolumeMigrationState {
+					return &v1.VolumeMigrationState{MigratedVolumes: migVols(src, dst)}
+				}
+				volUpdateState := func(src, dst string) *v1.VolumeUpdateState {
+					return &v1.VolumeUpdateState{VolumeMigrationState: migState(src, dst)}
+				}
+
+				DescribeTable("should handle migratedVolumes propagation from VMI to VM", func(
+					volClaim string,
+					vmiMigratedVols []v1.StorageMigratedVolumeInfo,
+					vmVolumeUpdateState *v1.VolumeUpdateState,
+					expectedVolumeMigrationState *v1.VolumeMigrationState,
+				) {
+					testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
+						Spec: v1.KubeVirtSpec{
+							Configuration: v1.KubeVirtConfiguration{
+								VMRolloutStrategy: &liveUpdate,
+							},
+						},
+					})
+
+					vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, volClaim))
+					vm := libvmi.NewVirtualMachine(
+						libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, volClaim)),
+						libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration),
+					)
+
+					vmi.Status.MigratedVolumes = vmiMigratedVols
+					vm.Status.VolumeUpdateState = vmVolumeUpdateState
+
+					controller.handleVolumeUpdateRequest(vm, vmi)
+
+					if expectedVolumeMigrationState == nil {
+						if vm.Status.VolumeUpdateState == nil {
+							return
+						}
+						Expect(vm.Status.VolumeUpdateState.VolumeMigrationState).To(BeNil())
+					} else {
+						Expect(vm.Status.VolumeUpdateState).ToNot(BeNil())
+						Expect(vm.Status.VolumeUpdateState.VolumeMigrationState).To(Equal(expectedVolumeMigrationState))
+					}
+				},
+					Entry("should propagate when VM status update previously failed",
+						"dv1", migVols("dv0", "dv1"), nil, migState("dv0", "dv1"),
+					),
+					Entry("should not update when VM already has matching migratedVolumes",
+						"dv1", migVols("dv0", "dv1"), volUpdateState("dv0", "dv1"), migState("dv0", "dv1"),
+					),
+					Entry("should not update when VMI has no migratedVolumes",
+						"dv1", nil, nil, nil,
+					),
+					Entry("should not propagate stale migratedVolumes from cancelled migration",
+						"dv0", migVols("dv0", "dv1"), nil, nil,
+					),
+					Entry("should overwrite with new migratedVolumes during chained migration",
+						"dv2", migVols("dv1", "dv2"), volUpdateState("dv0", "dv1"), migState("dv1", "dv2"),
+					),
+				)
+
+				DescribeTable("should return an error", func(setup func() (*v1.VirtualMachineInstance, *v1.VirtualMachine)) {
 					testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
 						Spec: v1.KubeVirtSpec{
 							Configuration: v1.KubeVirtConfiguration{
@@ -6053,15 +6239,8 @@ var _ = Describe("VirtualMachine", func() {
 							return true, vmi, nil
 						})
 
-					if dvExist {
-						dv := libdv.NewDataVolume(libdv.WithName(newDVName), libdv.WithNamespace(ns))
-						Expect(dataVolumeInformer.GetStore().Add(dv)).To(Succeed())
-					}
-					vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, oldDVName))
-					vm := libvmi.NewVirtualMachine(libvmi.New(libvmi.WithNamespace(ns),
-						libvmi.WithDataVolume(diskName, newDVName)),
-						libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration))
-					vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm,
+					vmi, vm := setup()
+					vm, err := virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm,
 						metav1.CreateOptions{})
 					Expect(err).To(Succeed())
 					vmi, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(context.TODO(),
@@ -6071,8 +6250,29 @@ var _ = Describe("VirtualMachine", func() {
 					Expect(virtcontroller.NewVirtualMachineConditionManager().GetCondition(vm,
 						v1.VirtualMachineRestartRequired)).Should(BeNil())
 				},
-					Entry("when the destination DV doesn't exist", false, storagetypes.NewDVNotFoundError(newDVName)),
-					Entry("when the destination DV exist but the PVC", true, storagetypes.NewPVCNotFoundError(newDVName)),
+					Entry("when the destination DV doesn't exist", func() (*v1.VirtualMachineInstance, *v1.VirtualMachine) {
+						vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, oldDVName))
+						vm := libvmi.NewVirtualMachine(libvmi.New(libvmi.WithNamespace(ns),
+							libvmi.WithDataVolume(diskName, newDVName)),
+							libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration))
+						return vmi, vm
+					}),
+					Entry("when the destination DV exists but not the PVC", func() (*v1.VirtualMachineInstance, *v1.VirtualMachine) {
+						dv := libdv.NewDataVolume(libdv.WithName(newDVName), libdv.WithNamespace(ns))
+						Expect(dataVolumeInformer.GetStore().Add(dv)).To(Succeed())
+						vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, oldDVName))
+						vm := libvmi.NewVirtualMachine(libvmi.New(libvmi.WithNamespace(ns),
+							libvmi.WithDataVolume(diskName, newDVName)),
+							libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration))
+						return vmi, vm
+					}),
+					Entry("when the destination PVC doesn't exist", func() (*v1.VirtualMachineInstance, *v1.VirtualMachine) {
+						vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithPersistentVolumeClaim(diskName, "oldPVC"))
+						vm := libvmi.NewVirtualMachine(libvmi.New(libvmi.WithNamespace(ns),
+							libvmi.WithPersistentVolumeClaim(diskName, "newPVC")),
+							libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration))
+						return vmi, vm
+					}),
 				)
 			})
 
@@ -6861,7 +7061,65 @@ var _ = Describe("VirtualMachine", func() {
 				Entry("Manual", v1.RunStrategyManual),
 			)
 
-			PIt("The VM should get restarted when doing RerunOnFailure -> Halted -> RerunOnFailure", func() {
+			DescribeTable("shouldStartRerunOnFailure should", func(stateChangeRequests []v1.VirtualMachineStateChangeRequest, statusRunStrategy v1.VirtualMachineRunStrategy, expected bool) {
+				vm, _ := watchtesting.DefaultVirtualMachine(true)
+				vm.Spec.Running = nil
+				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+				vm.Status.StateChangeRequests = stateChangeRequests
+				vm.Status.RunStrategy = statusRunStrategy
+
+				result := shouldStartRerunOnFailure(vm, v1.RunStrategyRerunOnFailure)
+				Expect(result).To(Equal(expected))
+			},
+				Entry("return true when VM was never started (empty status RunStrategy)",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.VirtualMachineRunStrategy(""),
+					true,
+				),
+				Entry("return false when VM was stopped and status matches spec",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyRerunOnFailure,
+					false,
+				),
+				Entry("return true when a StartRequest is present after VMI failure",
+					[]v1.VirtualMachineStateChangeRequest{{Action: v1.StartRequest}},
+					v1.RunStrategyRerunOnFailure,
+					true,
+				),
+				Entry("return true when RunStrategy was changed from Always",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyAlways,
+					true,
+				),
+				Entry("return true when RunStrategy was changed from Halted",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyHalted,
+					true,
+				),
+				Entry("return true when StartRequest is present and RunStrategy was also changed",
+					[]v1.VirtualMachineStateChangeRequest{{Action: v1.StartRequest}},
+					v1.RunStrategyAlways,
+					true,
+				),
+			)
+
+			It("should not start a RerunOnFailure VM that was manually stopped", func() {
+				vm, _ := watchtesting.DefaultVirtualMachine(true)
+				vm.Spec.Running = nil
+				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+				vm.Status.RunStrategy = v1.RunStrategyRerunOnFailure
+
+				vm, err := virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				addVirtualMachine(vm)
+
+				sanityExecute(vm)
+
+				_, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
+				Expect(err).To(MatchError(k8serrors.IsNotFound, "IsNotFound"))
+			})
+
+			It("The VM should get restarted when doing RerunOnFailure -> Halted -> RerunOnFailure", func() {
 				vm, _ := watchtesting.DefaultVirtualMachine(true)
 				vm.Spec.Running = nil
 				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
@@ -6871,6 +7129,7 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				controller.crIndexer.Add(createVMRevision(vm))
 
@@ -6884,6 +7143,7 @@ var _ = Describe("VirtualMachine", func() {
 				Expect(err).To(Not(HaveOccurred()))
 				controller.Queue.Add(key)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				By("Change RunStrategy to Halted")
 				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyHalted)
@@ -6893,13 +7153,18 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
-				controller.crIndexer.Delete(createVMRevision(vm))
+				cr := createVMRevision(vm)
+				controller.crIndexer.Delete(cr)
+				err = k8sClient.AppsV1().ControllerRevisions(vm.Namespace).Delete(context.TODO(), cr.Name, metav1.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
 
 				// let the controller pick up the deletion
 				controller.Queue.Add(key)
 				controller.vmiIndexer.Delete(vmi)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				_, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 				Expect(err).To(MatchError(k8serrors.IsNotFound, "IsNotFound"))
@@ -6912,6 +7177,7 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				vmi, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())

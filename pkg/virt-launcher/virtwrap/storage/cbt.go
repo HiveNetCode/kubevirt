@@ -37,9 +37,13 @@ import (
 
 	osdisk "kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
+	"kubevirt.io/kubevirt/pkg/storage/volumepath"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 	convertertypes "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/types"
+)
+
+const (
+	overlayClusterSize = 1 << 18 // 256KiB
 )
 
 func DiskHasDataStore(disk *api.Disk) bool {
@@ -147,7 +151,7 @@ func runOverlayQMPSession(ctx context.Context, stdin io.WriteCloser, stdout io.R
 	overlaySize int64, overlayPath string) (string, error) {
 
 	qmpCapabilities := `{"execute": "qmp_capabilities"}`
-	blockdevCreate := fmt.Sprintf(`{"execute": "blockdev-create", "arguments": {"job-id": "create", "options": {"driver": "qcow2", "file": "file", "data-file": "data-file", "data-file-raw": true, "size": %d}}}`, overlaySize)
+	blockdevCreate := fmt.Sprintf(`{"execute": "blockdev-create", "arguments": {"job-id": "create", "options": {"driver": "qcow2", "file": "file", "data-file": "data-file", "data-file-raw": true, "size": %d, "cluster-size": %d}}}`, overlaySize, overlayClusterSize)
 	queryJobs := `{"execute": "query-jobs"}`
 	jobDismiss := `{"execute": "job-dismiss", "arguments": {"id": "create"}}`
 	quit := `{"execute": "quit"}`
@@ -280,7 +284,7 @@ func ApplyChangedBlockTracking(vmi *v1.VirtualMachineInstance, c *convertertypes
 		}
 
 		isBlock := c.IsBlockPVC[volumeName] || c.IsBlockDV[volumeName]
-		imagePath := converter.GetVolumeImagePath(volumeName, isBlock, isHotplug)
+		imagePath := volumepath.Image(volumeName, isBlock, isHotplug)
 
 		err := CreateQCOW2Overlay(overlayPath, imagePath, isBlock)
 		if err != nil {
@@ -317,7 +321,7 @@ func ApplyChangedBlockTrackingForMigration(vmi *v1.VirtualMachineInstance, c *co
 		if isMigrationNewBackendStorage(vmi) {
 			_, isHotplug := c.HotplugVolumes[volumeName]
 			isBlock := c.IsBlockPVC[volumeName] || c.IsBlockDV[volumeName]
-			imagePath := converter.GetVolumeImagePath(volumeName, isBlock, isHotplug)
+			imagePath := volumepath.Image(volumeName, isBlock, isHotplug)
 
 			logger.V(3).Infof("Creating CBT overlay for migration: %s -> %s (block=%v, hotplug=%v)", overlayPath, imagePath, isBlock, isHotplug)
 			if err := CreateQCOW2Overlay(overlayPath, imagePath, isBlock); err != nil {

@@ -34,15 +34,11 @@ import (
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
-var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute] Instance type and preference ControllerRevision Upgrades", decorators.SigCompute, decorators.SigComputeInstancetype, func() {
-	var virtClient kubecli.KubevirtClient
-
-	BeforeEach(func() {
-		virtClient = kubevirt.Client()
-	})
-
-	var vm *virtv1.VirtualMachine
-
+var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute] Instance type and preference ControllerRevision Upgrades", decorators.SigCompute, decorators.SigComputeInstancetype, decorators.WgS390x, func() {
+	var (
+		vm         *virtv1.VirtualMachine
+		virtClient kubecli.KubevirtClient
+	)
 	createControllerRevision := func(obj runtime.Object) (*appsv1.ControllerRevision, error) {
 		cr, err := revision.CreateControllerRevision(vm, obj)
 		Expect(err).ToNot(HaveOccurred())
@@ -104,6 +100,7 @@ var _ = Describe("[crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-c
 	}
 
 	BeforeEach(func() {
+		virtClient = kubevirt.Client()
 		// We create a fake instance type and preference here just to allow for
 		// the creation of the initial VirtualMachine. This then allows the
 		// creation of a ControllerRevision later on in the test to use the now

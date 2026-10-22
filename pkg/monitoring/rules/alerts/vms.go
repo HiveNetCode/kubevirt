@@ -29,41 +29,16 @@ import (
 // excludedFilesystemTypesRegex contains filesystem types that should be ignored by space-usage alerts.
 // Rationale:
 // - Read-only image filesystems often appear 100% used and are not actionable for capacity (iso9660/CDFS, udf, squashfs, cramfs).
+// - Windows QEMU Guest Agent reports optical media as CDFS (ISO 9660) or UDF, with casing that varies
+// by guest; Linux reports iso9660/udf. Matching is case-insensitive so CDROMs (0 bytes free by definition)
+// do not fire GuestFilesystemAlmostOutOfSpace.
 // - Pseudo/kernel/ephemeral filesystems are not meaningful indicators of guest disk pressure
 // (e.g., tmpfs, proc, sysfs, cgroup*, overlay, fuse.*).
 // Keep this list aligned with common node_exporter exclusions to minimize noise in alerts.
-const excludedFilesystemTypesRegex = "CDFS|iso9660|udf|squashfs|cramfs|tmpfs|devtmpfs|proc|sysfs|selinuxfs|securityfs|pstore|debugfs|" +
+const excludedFilesystemTypesRegex = "(?i)CDFS|iso9660|udf|squashfs|cramfs|tmpfs|devtmpfs|proc|sysfs|selinuxfs|securityfs|pstore|debugfs|" +
 	"tracefs|configfs|binfmt_misc|bpf|devpts|mqueue|nsfs|rpc_pipefs|ramfs|rootfs|overlay|cgroup.*|fuse\\\\..*|fusectl"
 
 var vmsAlerts = []promv1.Rule{
-	{
-		Alert: "VirtLauncherPodsStuckFailed",
-		Expr:  intstr.FromString("sum(kube_pod_status_phase{phase='Failed', pod=~'virt-launcher-.*'}) >= 200"),
-		For:   ptr.To(promv1.Duration("10m")),
-		Annotations: map[string]string{
-			summaryAnnotationKey: "At least 200 virt-launcher pods are stuck in Failed state and not deleted for 10 minutes.",
-		},
-		Labels: map[string]string{
-			severityAlertLabelKey:        "critical",
-			operatorHealthImpactLabelKey: "critical",
-		},
-	},
-	{
-		Alert: "OrphanedVirtualMachineInstances",
-		Expr: intstr.FromString(
-			"(((max by (node) (kube_pod_status_ready{condition='true',pod=~'virt-handler.*'} " +
-				"* on(pod) group_left(node) max by(pod,node)(kube_pod_info{pod=~'virt-handler.*',node!=''})) ) == 1) " +
-				"or (count by (node)( kube_pod_info{pod=~'virt-launcher.*',node!=''})*0)) == 0",
-		),
-		For: ptr.To(promv1.Duration("10m")),
-		Annotations: map[string]string{
-			summaryAnnotationKey: "No ready virt-handler pod detected on node {{ $labels.node }} with running vmis for more than 10 minutes",
-		},
-		Labels: map[string]string{
-			severityAlertLabelKey:        "warning",
-			operatorHealthImpactLabelKey: "warning",
-		},
-	},
 	{
 		Alert: "VMCannotBeEvicted",
 		Expr: intstr.FromString(
@@ -227,21 +202,6 @@ var vmsAlerts = []promv1.Rule{
 		},
 	},
 	{
-		Alert: "VirtualMachineInstanceHasEphemeralHotplugVolume",
-		Expr:  intstr.FromString("kubevirt_vmi_contains_ephemeral_hotplug_volume == 1"),
-		Annotations: map[string]string{
-			summaryAnnotationKey: "Virtual Machine Instance has Ephemeral Hotplug Volume(s). Ephemeral Hotplugs are deprecated and " +
-				"must be converted to persistent volumes! In a future release, feature gate `DeclarativeHotplugVolumes` will replace " +
-				"`HotplugVolumes` and as a result, any remaining ephemeral hotplug volumes will be automatically unplugged",
-			descriptionAnnotationKey: "Virtual Machine Instance {{ $labels.name }} in namespace {{ $labels.namespace }} has ephemeral " +
-				"hotplug volume(s) {{ $labels.volume_name }}.",
-		},
-		Labels: map[string]string{
-			severityAlertLabelKey:        "warning",
-			operatorHealthImpactLabelKey: "none",
-		},
-	},
-	{
 		Alert: "KubeVirtVMGuestMemoryAvailableLow",
 		Expr: intstr.FromString(
 			"((" +
@@ -259,6 +219,29 @@ var vmsAlerts = []promv1.Rule{
 		},
 		Labels: map[string]string{
 			severityAlertLabelKey:        "info",
+			operatorHealthImpactLabelKey: "none",
+		},
+	},
+	{
+		Alert: "VMNonRecoverableOSPanic",
+		Expr: intstr.FromString(`
+			floor(
+				(
+					sum by (namespace, name) (kubevirt_vmi_guest_os_panic_total)
+					unless
+					sum by (namespace, name) (kubevirt_vmi_guest_os_panic_total offset 24h)
+				)
+				or
+				sum by (namespace, name) (increase(kubevirt_vmi_guest_os_panic_total[24h]))
+			) > 5
+		`),
+		For: ptr.To(promv1.Duration("1m")),
+		Annotations: map[string]string{
+			summaryAnnotationKey:     "VM {{ $labels.name }} in namespace {{ $labels.namespace }} experienced a non-recoverable guest OS panic",
+			descriptionAnnotationKey: "The VM has experienced {{ $value }} non-recoverable guest OS panic(s) in the last 24 hours.",
+		},
+		Labels: map[string]string{
+			severityAlertLabelKey:        "critical",
 			operatorHealthImpactLabelKey: "none",
 		},
 	},

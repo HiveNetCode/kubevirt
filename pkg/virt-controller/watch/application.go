@@ -70,7 +70,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	poolv1 "kubevirt.io/api/pool/v1beta1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
@@ -227,6 +227,8 @@ type VirtControllerApp struct {
 	preferenceInformer          cache.SharedIndexInformer
 	clusterPreferenceInformer   cache.SharedIndexInformer
 
+	vmTemplateInformer cache.SharedIndexInformer
+
 	LeaderElection leaderelectionconfig.Configuration
 
 	launcherImage              string
@@ -249,6 +251,11 @@ type VirtControllerApp struct {
 	hasCDI bool
 	// indicates if controllers were started with or without DRA support
 	isDRAEnabled bool
+	// indicates if controllers were started with or without Template support
+	isVirtTemplateDeploymentEnabled bool
+	// indicates if controllers were started with or without OCI export support
+	isOCIExportEnabled bool
+
 	// the channel used to trigger re-initialization.
 	reInitChan chan string
 
@@ -335,7 +342,7 @@ func Execute() {
 	stopChan := ctx.Done()
 	app.ctx = ctx
 
-	app.informerFactory = controller.NewKubeInformerFactory(app.restClient, app.clientSet, nil, app.kubevirtNamespace)
+	app.informerFactory = controller.NewKubeInformerFactory(app.restClient, app.clientSet, app.clientSet, nil, app.kubevirtNamespace)
 
 	app.crdInformer = app.informerFactory.CRD()
 	app.kubeVirtInformer = app.informerFactory.KubeVirt()
@@ -356,7 +363,9 @@ func Execute() {
 
 	app.reInitChan = make(chan string, 10)
 	app.hasCDI = app.clusterConfig.HasDataVolumeAPI()
-	app.isDRAEnabled = app.clusterConfig.GPUsWithDRAGateEnabled() || app.clusterConfig.HostDevicesWithDRAEnabled()
+	app.isDRAEnabled = app.clusterConfig.AnyDeviceDRAGateEnabled()
+	app.isVirtTemplateDeploymentEnabled = app.clusterConfig.VirtTemplateDeploymentEnabled()
+	app.isOCIExportEnabled = app.clusterConfig.OCIExportEnabled()
 	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
@@ -450,6 +459,10 @@ func Execute() {
 	app.preferenceInformer = app.informerFactory.VirtualMachinePreference()
 	app.clusterPreferenceInformer = app.informerFactory.VirtualMachineClusterPreference()
 
+	if app.isVirtTemplateDeploymentEnabled && app.isOCIExportEnabled {
+		app.vmTemplateInformer = app.informerFactory.VirtualMachineTemplate()
+	}
+
 	app.onOpenshift = onOpenShift
 
 	metricsInformers := &metrics.Indexers{
@@ -508,12 +521,32 @@ func (vca *VirtControllerApp) configModificationCallback() {
 		vca.reInitChan <- "reinit"
 		return
 	}
-	newIsDRAEnabled := vca.clusterConfig.GPUsWithDRAGateEnabled() || vca.clusterConfig.HostDevicesWithDRAEnabled()
+	newIsDRAEnabled := vca.clusterConfig.AnyDeviceDRAGateEnabled()
 	if newIsDRAEnabled != vca.isDRAEnabled {
 		if newIsDRAEnabled {
 			log.Log.Infof("Reinitialize virt-controller, DRA integration has been introduced")
 		} else {
 			log.Log.Infof("Reinitialize virt-controller, DRA integration has been removed")
+		}
+		vca.reInitChan <- "reinit"
+		return
+	}
+	newIsVirtTemplateDeploymentEnabled := vca.clusterConfig.VirtTemplateDeploymentEnabled()
+	if newIsVirtTemplateDeploymentEnabled != vca.isVirtTemplateDeploymentEnabled {
+		if newIsVirtTemplateDeploymentEnabled {
+			log.Log.Infof("Reinitialize virt-controller, Template support has been introduced")
+		} else {
+			log.Log.Infof("Reinitialize virt-controller, Template support has been removed")
+		}
+		vca.reInitChan <- "reinit"
+		return
+	}
+	newIsOCIExportEnabled := vca.clusterConfig.OCIExportEnabled()
+	if newIsOCIExportEnabled != vca.isOCIExportEnabled {
+		if newIsOCIExportEnabled {
+			log.Log.Infof("Reinitialize virt-controller, OCI export has been enabled")
+		} else {
+			log.Log.Infof("Reinitialize virt-controller, OCI export has been disabled")
 		}
 		vca.reInitChan <- "reinit"
 		return
@@ -711,7 +744,7 @@ func (vca *VirtControllerApp) initCommon() {
 		func(field *k8sfield.Path, vmiSpec *v1.VirtualMachineInstanceSpec, clusterCfg *virtconfig.ClusterConfig) []metav1.StatusCause {
 			return netadmitter.ValidateCreation(field, vmiSpec, clusterCfg)
 		},
-		netmigration.NewEvaluator(vca.clusterConfig),
+		netmigration.NewEvaluator(),
 		vca.additionalLauncherAnnotationsSync,
 		vca.additionalLauncherLabelsSync,
 	)
@@ -797,7 +830,6 @@ func (vca *VirtControllerApp) initVirtualMachines() {
 		vca.clusterConfig,
 		netcontrollers.NewVMController(
 			vca.clientSet.GeneratedKubeVirtClient(),
-			vca.clusterConfig,
 		),
 		vm.NewFirmwareController(vca.clientSet.GeneratedKubeVirtClient()),
 		instancetypecontroller.New(
@@ -942,7 +974,9 @@ func (vca *VirtControllerApp) initExportController() {
 		ClusterPreferenceInformer:   vca.clusterPreferenceInformer,
 		ControllerRevisionInformer:  vca.controllerRevisionInformer,
 		VMBackupInformer:            vca.vmBackupInformer,
+		VMBackupTrackerInformer:     vca.vmBackupTrackerInformer,
 		BackupCAConfigMapInformer:   vca.caBackupConfigMapInformer,
+		VMTemplateInformer:          vca.vmTemplateInformer,
 	}
 	if err := vca.exportController.Init(); err != nil {
 		panic(err)
@@ -1087,11 +1121,10 @@ func (vca *VirtControllerApp) AddFlags() {
 		"Number of goroutines to run for clone controller")
 
 	flag.StringSliceVar(&vca.additionalLauncherAnnotationsSync, "additional-launcher-annotations-sync", []string{},
-		"Comma separated list of annotation keys which if present on the VM template and so VMI, will be sync to the virt-launcher pod. Note, it is unidirectional from VM.spec.template.metadata -> VMI and VMI -> virt-launcher pod")
+		"Comma separated list of annotation keys which if present on the VM template and so VMI, will be sync to the virt-launcher pod. Supports prefix wildcards via the '*' suffix (for example 'vendor.io/*'). Note, it is unidirectional from VM.spec.template.metadata -> VMI and VMI -> virt-launcher pod")
 
 	flag.StringSliceVar(&vca.additionalLauncherLabelsSync, "additional-launcher-labels-sync", []string{},
-		"Comma separated list of labels keys which if present on the VM template and so VMI, will be sync to the virt-launcher pod. Note, it is unidirectional from VM.spec.template.metadata -> VMI and VMI -> virt-launcher pod")
-
+		"Comma separated list of labels keys which if present on the VM template and so VMI, will be sync to the virt-launcher pod. Supports prefix wildcards via the '*' suffix (for example 'vendor.io/*'). Note, it is unidirectional from VM.spec.template.metadata -> VMI and VMI -> virt-launcher pod")
 	flag.IntVar(&vca.backupControllerThreads, "backup-controller-threads", defaultBackupControllerThreads,
 		"Number of goroutines to run for backup controller")
 }

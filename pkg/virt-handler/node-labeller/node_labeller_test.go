@@ -24,6 +24,8 @@ package nodelabeller
 import (
 	"context"
 	"fmt"
+	goruntime "runtime"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -40,6 +42,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
@@ -218,6 +221,83 @@ var _ = Describe("Node-labeller ", func() {
 		Expect(node.Labels).To(HaveKeyWithValue(v1.TDXLabel, "true"))
 	})
 
+	It("should not add vm-arch labels when feature gate is disabled", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).ToNot(HaveKey(v1.VMArchLabel + goruntime.GOARCH))
+	})
+
+	It("should add native vm-arch label when feature gate is enabled", func() {
+		initNodeLabeller(&v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kubevirt",
+				Namespace: "kubevirt",
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{
+					ObsoleteCPUModels: util.DefaultObsoleteCPUModels,
+					DeveloperConfiguration: &v1.DeveloperConfiguration{
+						FeatureGates: []string{string(featuregate.CrossArchitectureVirtualization)},
+					},
+				},
+			},
+		})
+		mockQueue := testutils.NewMockWorkQueue(nlController.queue)
+		nlController.queue = mockQueue
+
+		mockQueue.ExpectAdds(1)
+		nlController.queue.Add(nodeName)
+		mockQueue.Wait()
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKeyWithValue(v1.VMArchLabel+goruntime.GOARCH, "true"))
+	})
+
+	It("should add cross-arch vm-arch label when feature gate is enabled", func() {
+		crossArch := ""
+		switch goruntime.GOARCH {
+		case "amd64":
+			crossArch = "arm64"
+		case "arm64":
+			crossArch = "amd64"
+		default:
+			Skip("cross-arch emulation is only supported on amd64 and arm64")
+		}
+
+		initNodeLabeller(&v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kubevirt",
+				Namespace: "kubevirt",
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{
+					ObsoleteCPUModels: util.DefaultObsoleteCPUModels,
+					DeveloperConfiguration: &v1.DeveloperConfiguration{
+						FeatureGates: []string{string(featuregate.CrossArchitectureVirtualization)},
+					},
+				},
+			},
+		})
+		mockQueue := testutils.NewMockWorkQueue(nlController.queue)
+		nlController.queue = mockQueue
+
+		mockQueue.ExpectAdds(1)
+		nlController.queue.Add(nodeName)
+		mockQueue.Wait()
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKeyWithValue(v1.VMArchLabel+goruntime.GOARCH, "true"))
+		Expect(node.Labels).To(HaveKeyWithValue(v1.VMArchLabel+crossArch, "true"))
+	})
+
 	It("should add usable cpu model labels for the host cpu model", func() {
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
@@ -345,6 +425,54 @@ var _ = Describe("Node-labeller ", func() {
 
 		recorder := nlController.recorder.(*record.FakeRecorder)
 		Expect(recorder.Events).To(Receive(ContainSubstring("in ObsoleteCPUModels")))
+	})
+
+	It("should remove cpu model label when model is added to ObsoleteCPUModels", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKey(v1.CPUModelLabel + "Penryn"))
+		fakeNodeStore.Update(node)
+
+		nlController.clusterConfig.GetConfig().ObsoleteCPUModels["Penryn"] = true
+		nlController.queue.Add(nodeName)
+
+		res = nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node = retrieveNode(kubeClient)
+		Expect(node.Labels).ToNot(HaveKey(v1.CPUModelLabel + "Penryn"))
+	})
+
+	It("should remove all cpu model and migration labels when all models are obsolete", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKey(HavePrefix(v1.CPUModelLabel)))
+		Expect(node.Labels).To(HaveKey(HavePrefix(v1.SupportedHostModelMigrationCPU)))
+		fakeNodeStore.Update(node)
+
+		obsolete := nlController.clusterConfig.GetConfig().ObsoleteCPUModels
+		for key := range node.Labels {
+			if strings.HasPrefix(key, v1.CPUModelLabel) {
+				obsolete[strings.TrimPrefix(key, v1.CPUModelLabel)] = true
+			}
+			if strings.HasPrefix(key, v1.SupportedHostModelMigrationCPU) {
+				obsolete[strings.TrimPrefix(key, v1.SupportedHostModelMigrationCPU)] = true
+			}
+		}
+		nlController.queue.Add(nodeName)
+
+		res = nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node = retrieveNode(kubeClient)
+		for key := range node.Labels {
+			Expect(key).ToNot(HavePrefix(v1.CPUModelLabel))
+			Expect(key).ToNot(HavePrefix(v1.SupportedHostModelMigrationCPU))
+		}
 	})
 
 	It("should keep existing label that is not owned by node labeller", func() {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"kubevirt.io/kubevirt/pkg/libvmi"
-	"kubevirt.io/kubevirt/pkg/pointer"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -324,8 +324,8 @@ var _ = Describe("Resource pod spec renderer", func() {
 			draHostDev := v1.HostDevice{
 				Name: "dra-host",
 				ClaimRequest: &v1.ClaimRequest{
-					ClaimName:   pointer.P("dra-claim"),
-					RequestName: pointer.P("dra-request"),
+					ClaimName:   "dra-claim",
+					RequestName: "dra-request",
 				},
 			}
 			hostDevices := []v1.HostDevice{devicePluginHostDev, draHostDev}
@@ -349,8 +349,8 @@ var _ = Describe("Resource pod spec renderer", func() {
 			draGPU := v1.GPU{
 				Name: "dra-gpu",
 				ClaimRequest: &v1.ClaimRequest{
-					ClaimName:   pointer.P("gpu-claim"),
-					RequestName: pointer.P("gpu-request"),
+					ClaimName:   "gpu-claim",
+					RequestName: "gpu-request",
 				},
 			}
 			gpus := []v1.GPU{devicePluginGPU, draGPU}
@@ -371,15 +371,15 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "dra-host-1",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("request-a"),
+						ClaimName:   "shared-claim",
+						RequestName: "request-a",
 					},
 				},
 				{
 					Name: "dra-host-2",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("request-b"),
+						ClaimName:   "shared-claim",
+						RequestName: "request-b",
 					},
 				},
 			}
@@ -398,15 +398,15 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "dra-gpu-1",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("request-a"),
+						ClaimName:   "shared-claim",
+						RequestName: "request-a",
 					},
 				},
 				{
 					Name: "dra-gpu-2",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("request-b"),
+						ClaimName:   "shared-claim",
+						RequestName: "request-b",
 					},
 				},
 			}
@@ -425,8 +425,8 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "dra-gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("gpu-request"),
+						ClaimName:   "shared-claim",
+						RequestName: "gpu-request",
 					},
 				},
 			}
@@ -435,8 +435,8 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "dra-host",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("shared-claim"),
-						RequestName: pointer.P("hostdev-request"),
+						ClaimName:   "shared-claim",
+						RequestName: "hostdev-request",
 					},
 				},
 			}
@@ -448,6 +448,33 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{Name: "shared-claim", Request: "gpu-request"},
 				{Name: "shared-claim", Request: "hostdev-request"},
 			}))
+		})
+
+		It("should handle networks with DRA resources in API", func() {
+			networks := []v1.Network{
+				{
+					Name: "dra-net",
+					NetworkSource: v1.NetworkSource{
+						ResourceClaim: &v1.ClaimRequest{
+							ClaimName:   "net-claim",
+							RequestName: "net-request",
+						},
+					},
+				},
+				{
+					Name: "pod-net",
+					NetworkSource: v1.NetworkSource{
+						Pod: &v1.PodNetwork{},
+					},
+				},
+			}
+
+			rr = NewResourceRenderer(nil, nil, WithNetworksDRA(networks))
+
+			claims := rr.Claims()
+			Expect(claims).To(HaveLen(1))
+			Expect(claims[0].Name).To(Equal("net-claim"))
+			Expect(claims[0].Request).To(Equal("net-request"))
 		})
 
 		It("Unified functions should not interfere with other renderer options", func() {
@@ -469,8 +496,8 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "dra-gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("gpu-claim"),
-						RequestName: pointer.P("gpu-request"),
+						ClaimName:   "gpu-claim",
+						RequestName: "gpu-request",
 					},
 				},
 			}
@@ -491,8 +518,20 @@ var _ = Describe("Resource pod spec renderer", func() {
 				{
 					Name: "host-dev",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("hostdev-claim"),
-						RequestName: pointer.P("hostdev-request"),
+						ClaimName:   "hostdev-claim",
+						RequestName: "hostdev-request",
+					},
+				},
+			}
+
+			networks := []v1.Network{
+				{
+					Name: "dra-net",
+					NetworkSource: v1.NetworkSource{
+						ResourceClaim: &v1.ClaimRequest{
+							ClaimName:   "net-claim",
+							RequestName: "net-request",
+						},
 					},
 				},
 			}
@@ -500,6 +539,7 @@ var _ = Describe("Resource pod spec renderer", func() {
 			rr = NewResourceRenderer(limits, requests,
 				WithGPUsDRA(gpus),
 				WithHostDevicesDRA(hostDevices),
+				WithNetworksDRA(networks),
 			)
 
 			Expect(rr.Requests()).To(HaveKeyWithValue(kubev1.ResourceCPU, cpuRequest))
@@ -508,7 +548,7 @@ var _ = Describe("Resource pod spec renderer", func() {
 			Expect(rr.Limits()).To(HaveKeyWithValue(kubev1.ResourceMemory, memoryLimit))
 
 			claims = rr.Claims()
-			Expect(claims).To(HaveLen(2))
+			Expect(claims).To(HaveLen(3))
 
 			claimNames := make(map[string]string)
 			for _, claim := range claims {
@@ -517,10 +557,11 @@ var _ = Describe("Resource pod spec renderer", func() {
 
 			Expect(claimNames).To(HaveKeyWithValue("gpu-claim", "gpu-request"))
 			Expect(claimNames).To(HaveKeyWithValue("hostdev-claim", "hostdev-request"))
+			Expect(claimNames).To(HaveKeyWithValue("net-claim", "net-request"))
 		})
 	})
 
-	It("WithSEV option adds ", func() {
+	It("WithSEV option adds SEV device resource", func() {
 		sevResourceKey := kubev1.ResourceName("devices.kubevirt.io/sev")
 		rr = NewResourceRenderer(nil, nil, WithSEV())
 		Expect(rr.Requests()).To(Equal(kubev1.ResourceList{
@@ -528,6 +569,28 @@ var _ = Describe("Resource pod spec renderer", func() {
 		}))
 		Expect(rr.Limits()).To(Equal(kubev1.ResourceList{
 			sevResourceKey: *resource.NewQuantity(1, resource.DecimalSI),
+		}))
+	})
+
+	It("WithTDX option adds TDX device resource", func() {
+		tdxResourceKey := kubev1.ResourceName(TdxDevice)
+		rr = NewResourceRenderer(nil, nil, WithTDX())
+		Expect(rr.Requests()).To(Equal(kubev1.ResourceList{
+			tdxResourceKey: *resource.NewQuantity(1, resource.DecimalSI),
+		}))
+		Expect(rr.Limits()).To(Equal(kubev1.ResourceList{
+			tdxResourceKey: *resource.NewQuantity(1, resource.DecimalSI),
+		}))
+	})
+
+	It("WithIOMMUFD option adds IOMMUFD device resource", func() {
+		iommufdResourceKey := kubev1.ResourceName(IOMMUFDDevice)
+		rr = NewResourceRenderer(nil, nil, WithIOMMUFD())
+		Expect(rr.Requests()).To(Equal(kubev1.ResourceList{
+			iommufdResourceKey: *resource.NewQuantity(1, resource.DecimalSI),
+		}))
+		Expect(rr.Limits()).To(Equal(kubev1.ResourceList{
+			iommufdResourceKey: *resource.NewQuantity(1, resource.DecimalSI),
 		}))
 	})
 
@@ -684,3 +747,165 @@ func addResources(firstQuantity resource.Quantity, resources ...resource.Quantit
 	}
 	return firstQuantity
 }
+
+var _ = Describe("validatePermittedHostDevices", func() {
+	var (
+		vmiSpec *v1.VirtualMachineInstanceSpec
+		config  *virtconfig.ClusterConfig
+		kvStore cache.Store
+		kv      *v1.KubeVirt
+	)
+
+	BeforeEach(func() {
+		kv = &v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kubevirt",
+				Namespace: "kubevirt",
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{
+					PermittedHostDevices: &v1.PermittedHostDevices{
+						PciHostDevices: []v1.PciHostDevice{
+							{
+								PCIVendorSelector: "8086:1234",
+								ResourceName:      "intel.com/gpu",
+							},
+						},
+					},
+				},
+			},
+		}
+		config, _, kvStore = testutils.NewFakeClusterConfigUsingKV(kv)
+
+		vmiSpec = &v1.VirtualMachineInstanceSpec{
+			Domain: v1.DomainSpec{
+				Devices: v1.Devices{},
+			},
+		}
+	})
+
+	Context("without DRA feature gate", func() {
+		It("should pass validation when no devices are specified", func() {
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should pass validation when HostDevice is in permitted list", func() {
+			vmiSpec.Domain.Devices.HostDevices = []v1.HostDevice{
+				{
+					Name:       "hostdev1",
+					DeviceName: "intel.com/gpu",
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should pass validation when GPU is in permitted list", func() {
+			vmiSpec.Domain.Devices.GPUs = []v1.GPU{
+				{
+					Name:       "gpu1",
+					DeviceName: "intel.com/gpu",
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should fail validation when HostDevice is not in permitted list", func() {
+			vmiSpec.Domain.Devices.HostDevices = []v1.HostDevice{
+				{
+					Name:       "hostdev1",
+					DeviceName: "unknown.com/device",
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(ContainSubstring("HostDevice unknown.com/device is not permitted")))
+		})
+
+		It("should fail validation when GPU is not in permitted list", func() {
+			vmiSpec.Domain.Devices.GPUs = []v1.GPU{
+				{
+					Name:       "gpu1",
+					DeviceName: "unknown.com/device",
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(ContainSubstring("GPU unknown.com/device is not permitted")))
+		})
+	})
+
+	Context("with DRA feature gates enabled", func() {
+		BeforeEach(func() {
+			kv.Spec.Configuration.DeveloperConfiguration = &v1.DeveloperConfiguration{
+				FeatureGates: []string{"HostDevicesWithDRA", "GPUsWithDRA"},
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kv)
+		})
+
+		It("should skip DRA HostDevice validation but still validate legacy devices", func() {
+			vmiSpec.Domain.Devices.HostDevices = []v1.HostDevice{
+				{
+					// Legacy device - has DeviceName
+					Name:       "legacy-hostdev",
+					DeviceName: "intel.com/gpu", // permitted device
+				},
+				{
+					// DRA device - no DeviceName, has ClaimRequest
+					Name: "dra-hostdev",
+					ClaimRequest: &v1.ClaimRequest{
+						ClaimName:   "my-claim",
+						RequestName: "my-request",
+					},
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should skip DRA GPU validation but still validate legacy devices", func() {
+			vmiSpec.Domain.Devices.GPUs = []v1.GPU{
+				{
+					Name:       "legacy-gpu",
+					DeviceName: "intel.com/gpu", // permitted device
+				},
+				{
+					Name: "dra-gpu",
+					ClaimRequest: &v1.ClaimRequest{
+						ClaimName:   "my-gpu-claim",
+						RequestName: "my-gpu-request",
+					},
+				},
+			}
+			err := validatePermittedHostDevices(vmiSpec, config)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		DescribeTable("should fail validation for unpermitted legacy devices even with DRA enabled",
+			func(setupDevices func(), expectedError string) {
+				setupDevices()
+				err := validatePermittedHostDevices(vmiSpec, config)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(expectedError))
+			},
+			Entry("unpermitted legacy HostDevice", func() {
+				vmiSpec.Domain.Devices.HostDevices = []v1.HostDevice{
+					{
+						Name:       "legacy-hostdev",
+						DeviceName: "unpermitted.com/device", // not permitted
+					},
+				}
+			}, "HostDevice unpermitted.com/device is not permitted"),
+			Entry("unpermitted legacy GPU", func() {
+				vmiSpec.Domain.Devices.GPUs = []v1.GPU{
+					{
+						Name:       "legacy-gpu",
+						DeviceName: "unpermitted.com/gpu", // not permitted
+					},
+				}
+			}, "GPU unpermitted.com/gpu is not permitted"),
+		)
+	})
+})

@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,17 +44,24 @@ import (
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/emptydisk"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
-	"kubevirt.io/kubevirt/pkg/hypervisor"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/storage/reservation"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
+	"kubevirt.io/kubevirt/pkg/storage/volumepath"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/compute"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/iothreads"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/kvm"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/metadata"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/mshv"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/network"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/storage"
 	convertertypes "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/types"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/virtio"
@@ -65,6 +71,7 @@ import (
 
 const (
 	deviceTypeNotCompatibleFmt = "device %s is of type lun. Not compatible with a file based disk"
+	maxCustomBlockSizeS390x    = 4096
 )
 
 type deviceNamer struct {
@@ -155,7 +162,6 @@ func Convert_v1_Disk_To_api_Disk(c *convertertypes.ConverterContext, diskDevice 
 		if ok && volumeStatus.PersistentVolumeClaimInfo != nil {
 			disk.FilesystemOverhead = volumeStatus.PersistentVolumeClaimInfo.FilesystemOverhead
 			disk.Capacity = storagetypes.GetDiskCapacity(volumeStatus.PersistentVolumeClaimInfo)
-			disk.ExpandDisksEnabled = c.ExpandDisksEnabled
 		}
 	}
 	if numQueues != nil && disk.Target.Bus == v1.DiskBusVirtio {
@@ -174,7 +180,8 @@ func Convert_v1_Disk_To_api_Disk(c *convertertypes.ConverterContext, diskDevice 
 
 func setReservation(disk *api.Disk) {
 	disk.Source.Reservations = &api.Reservations{
-		Managed: "no",
+		Managed:   "no",
+		Migration: "yes",
 		SourceReservations: &api.SourceReservations{
 			Type: "unix",
 			Path: reservation.GetPrHelperSocketPath(),
@@ -242,12 +249,18 @@ func (c *directIOChecker) check(path string, flags int) (bool, error) {
 	return true, nil
 }
 
-func Convert_v1_BlockSize_To_api_BlockIO(source *v1.Disk, disk *api.Disk) error {
+func Convert_v1_BlockSize_To_api_BlockIO(source *v1.Disk, disk *api.Disk, arch string) error {
 	if source.BlockSize == nil {
 		return nil
 	}
 
 	if blockSize := source.BlockSize.Custom; blockSize != nil {
+		if arch == "s390x" &&
+			(blockSize.Logical > maxCustomBlockSizeS390x || blockSize.Physical > maxCustomBlockSizeS390x) {
+			return fmt.Errorf(
+				"custom block size (logical=%d, physical=%d) exceeds the maximum supported size of %d for architecture %s",
+				blockSize.Logical, blockSize.Physical, maxCustomBlockSizeS390x, arch)
+		}
 		disk.BlockIO = &api.BlockIO{
 			LogicalBlockSize:  blockSize.Logical,
 			PhysicalBlockSize: blockSize.Physical,
@@ -647,40 +660,6 @@ func Convert_v1_Config_To_api_Disk(volumeName string, disk *api.Disk, configType
 	return nil
 }
 
-func GetFilesystemVolumePath(volumeName string) string {
-	return filepath.Join(string(filepath.Separator), "var", "run", "kubevirt-private", "vmi-disks", volumeName, "disk.img")
-}
-
-// GetHotplugFilesystemVolumePath returns the path and file name of a hotplug disk image
-func GetHotplugFilesystemVolumePath(volumeName string) string {
-	return filepath.Join(string(filepath.Separator), "var", "run", "kubevirt", "hotplug-disks", fmt.Sprintf("%s.img", volumeName))
-}
-
-func GetBlockDeviceVolumePath(volumeName string) string {
-	return filepath.Join(string(filepath.Separator), "dev", volumeName)
-}
-
-// GetHotplugBlockDeviceVolumePath returns the path and name of a hotplugged block device
-func GetHotplugBlockDeviceVolumePath(volumeName string) string {
-	return filepath.Join(string(filepath.Separator), "var", "run", "kubevirt", "hotplug-disks", volumeName)
-}
-
-// GetVolumeImagePath returns the backing image path for a volume, considering whether it's
-// a hotplug volume and whether it's a block device
-func GetVolumeImagePath(volumeName string, isBlock, isHotplug bool) string {
-	if isBlock {
-		if isHotplug {
-			return GetHotplugBlockDeviceVolumePath(volumeName)
-		}
-		return GetBlockDeviceVolumePath(volumeName)
-	}
-
-	if isHotplug {
-		return GetHotplugFilesystemVolumePath(volumeName)
-	}
-	return GetFilesystemVolumePath(volumeName)
-}
-
 func setDiskDriver(disk *api.Disk, driverType string, discard bool) {
 	disk.Driver.Type = driverType
 	disk.Driver.ErrorPolicy = v1.DiskErrorPolicyStop
@@ -704,12 +683,12 @@ func convertVolumeWithCBT(volumeName, cbtPath string, isBlock bool, disk *api.Di
 		disk.Source.Name = volumeName
 		disk.Source.DataStore.Type = "block"
 		disk.Source.DataStore.Source = &api.DiskSource{
-			Dev: GetBlockDeviceVolumePath(volumeName),
+			Dev: volumepath.BlockDevice(volumeName),
 		}
 	} else {
 		disk.Source.DataStore.Type = "file"
 		disk.Source.DataStore.Source = &api.DiskSource{
-			File: GetFilesystemVolumePath(volumeName),
+			File: volumepath.Filesystem(volumeName),
 		}
 	}
 
@@ -722,10 +701,10 @@ func convertVolumeWithoutCBT(volumeName string, isBlock bool, disk *api.Disk, vo
 	if isBlock {
 		disk.Type = "block"
 		disk.Source.Name = volumeName
-		disk.Source.Dev = GetBlockDeviceVolumePath(volumeName)
+		disk.Source.Dev = volumepath.BlockDevice(volumeName)
 	} else {
 		disk.Type = "file"
-		disk.Source.File = GetFilesystemVolumePath(volumeName)
+		disk.Source.File = volumepath.Filesystem(volumeName)
 	}
 	return nil
 }
@@ -744,12 +723,12 @@ func convertHotplugVolumeWithCBT(volumeName, cbtPath string, isBlock bool, disk 
 	if isBlock {
 		disk.Source.DataStore.Type = "block"
 		disk.Source.DataStore.Source = &api.DiskSource{
-			Dev: GetHotplugBlockDeviceVolumePath(volumeName),
+			Dev: volumepath.HotplugBlockDevice(volumeName),
 		}
 	} else {
 		disk.Source.DataStore.Type = "file"
 		disk.Source.DataStore.Source = &api.DiskSource{
-			File: GetHotplugFilesystemVolumePath(volumeName),
+			File: volumepath.HotplugFilesystem(volumeName),
 		}
 	}
 
@@ -761,10 +740,10 @@ func convertHotplugVolumeWithoutCBT(volumeName string, isBlock bool, disk *api.D
 
 	if isBlock {
 		disk.Type = "block"
-		disk.Source.Dev = GetHotplugBlockDeviceVolumePath(volumeName)
+		disk.Source.Dev = volumepath.HotplugBlockDevice(volumeName)
 	} else {
 		disk.Type = "file"
-		disk.Source.File = GetHotplugFilesystemVolumePath(volumeName)
+		disk.Source.File = volumepath.HotplugFilesystem(volumeName)
 	}
 	return nil
 }
@@ -805,7 +784,7 @@ func Convert_v1_Hotplug_DataVolume_To_api_Disk(name string, disk *api.Disk, c *c
 func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "file"
 	setDiskDriver(disk, "raw", false)
-	disk.Source.File = GetFilesystemVolumePath(volumeName)
+	disk.Source.File = volumepath.Filesystem(volumeName)
 	if !slices.Contains(volumesDiscardIgnore, volumeName) {
 		disk.Driver.Discard = "unmap"
 	}
@@ -816,7 +795,7 @@ func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.
 func Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "file"
 	setDiskDriver(disk, "raw", !slices.Contains(volumesDiscardIgnore, volumeName))
-	disk.Source.File = GetHotplugFilesystemVolumePath(volumeName)
+	disk.Source.File = volumepath.HotplugFilesystem(volumeName)
 	return nil
 }
 
@@ -824,7 +803,7 @@ func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk,
 	disk.Type = "block"
 	setDiskDriver(disk, "raw", !slices.Contains(volumesDiscardIgnore, volumeName))
 	disk.Source.Name = volumeName
-	disk.Source.Dev = GetBlockDeviceVolumePath(volumeName)
+	disk.Source.Dev = volumepath.BlockDevice(volumeName)
 	return nil
 }
 
@@ -832,7 +811,7 @@ func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk,
 func Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "block"
 	setDiskDriver(disk, "raw", !slices.Contains(volumesDiscardIgnore, volumeName))
-	disk.Source.Dev = GetHotplugBlockDeviceVolumePath(volumeName)
+	disk.Source.Dev = volumepath.HotplugBlockDevice(volumeName)
 	return nil
 }
 
@@ -999,13 +978,89 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	}
 
 	hasIOThreads := iothreads.HasIOThreads(vmi)
-	var autoThreads int
+	var ioThreadCount, autoThreads int
 	if hasIOThreads {
-		_, autoThreads = iothreads.GetIOThreadsCountType(vmi)
+		ioThreadCount, autoThreads = iothreads.GetIOThreadsCountType(vmi)
 	}
 
-	// Construct the DomainBuilder specific to the hypervisor
-	if err := hypervisor.MakeDomainBuilder(c.HypervisorName, vmi, c).Build(vmi, domain); err != nil {
+	architecture := c.Architecture.GetArchitecture()
+	virtioModel := virtio.InterpretTransitionalModelType(
+		vmi.Spec.Domain.Devices.UseVirtioTransitional,
+		architecture,
+	)
+	scsiControllerModel := c.Architecture.SCSIControllerModel(virtioModel)
+
+	configurators := []convertertypes.Configurator{
+		metadata.DomainConfigurator{},
+		network.NewDomainConfigurator(
+			network.WithDomainAttachmentByInterfaceName(c.DomainAttachmentByInterfaceName),
+			network.WithUseLaunchSecuritySEV(c.UseLaunchSecuritySEV),
+			network.WithUseLaunchSecurityPV(c.UseLaunchSecurityPV),
+			network.WithROMTuningSupport(c.Architecture.IsROMTuningSupported()),
+			network.WithVirtioModel(virtioModel),
+		),
+		compute.TPMDomainConfigurator{},
+		compute.VSOCKDomainConfigurator{},
+		compute.NewLaunchSecurityDomainConfigurator(architecture),
+		compute.ChannelsDomainConfigurator{},
+		compute.ClockDomainConfigurator{},
+		compute.NewRNGDomainConfigurator(
+			compute.RNGWithUseLaunchSecuritySEV(c.UseLaunchSecuritySEV),
+			compute.RNGWithUseLaunchSecurityPV(c.UseLaunchSecurityPV),
+			compute.RNGWithVirtioModel(virtioModel),
+		),
+		compute.NewInputDeviceDomainConfigurator(architecture),
+		compute.NewBalloonDomainConfigurator(
+			compute.BalloonWithUseLaunchSecuritySEV(c.UseLaunchSecuritySEV),
+			compute.BalloonWithUseLaunchSecurityPV(c.UseLaunchSecurityPV),
+			compute.BalloonWithFreePageReporting(c.FreePageReporting),
+			compute.BalloonWithMemBalloonStatsPeriod(c.MemBalloonStatsPeriod),
+			compute.BalloonWithVirtioModel(virtioModel),
+		),
+		compute.NewGraphicsDomainConfigurator(architecture, c.BochsForEFIGuests, c.AllowCrossArchEmulation),
+		compute.SoundDomainConfigurator{},
+		compute.NewHostDeviceDomainConfigurator(
+			c.GenericHostDevices,
+			c.GPUHostDevices,
+			c.SRIOVDevices,
+		),
+		compute.NewWatchdogDomainConfigurator(architecture),
+		compute.NewConsoleDomainConfigurator(c.SerialConsoleLog),
+		compute.PanicDevicesDomainConfigurator{},
+		compute.NewHypervisorFeaturesDomainConfigurator(c.Architecture.HasVMPort(), c.UseLaunchSecurityTDX),
+		compute.NewSysInfoDomainConfigurator(convertCmdv1SMBIOSToComputeSMBIOS(c.SMBios)),
+		compute.NewOSDomainConfigurator(c.Architecture.IsSMBiosNeeded(), convertEFIConfiguration(c.EFIConfiguration)),
+		storage.NewVirtiofsConfigurator(),
+		compute.UsbRedirectDeviceDomainConfigurator{},
+		compute.NewControllersDomainConfigurator(
+			compute.ControllersWithUSBNeeded(c.Architecture.IsUSBNeeded(vmi)),
+			compute.ControllersWithSCSIModel(scsiControllerModel),
+			compute.ControllersWithSCSIIOThreads(uint(autoThreads)),
+			compute.ControllersWithControllerDriver(controllerDriver),
+			compute.ControllersWithSupportPCIHole64Disabling(c.Architecture.SupportPCIHole64Disabling()),
+			compute.ControllersWithVirtioSerialModel(virtioModel),
+		),
+		compute.NewQemuCmdDomainConfigurator(c.Architecture.ShouldVerboseLogsBeEnabled()),
+		compute.NewCPUDomainConfigurator(c.Architecture.SupportCPUHotplug(), c.Architecture.RequiresMPXCPUValidation(), c.AllowCrossArchEmulation),
+		compute.NewIOThreadsDomainConfigurator(uint(ioThreadCount)),
+		compute.MemoryConfigurator{},
+		compute.RebootPolicyDomainConfigurator{},
+		compute.NewIOMMUFDConfigurator(c.IOMMUFDEnabled),
+	}
+
+	switch c.HypervisorName {
+	case v1.HyperVDirectHypervisorName:
+		configurators = append(configurators, mshv.NewMshvDomainConfigurator(c.AllowEmulation, c.HypervisorDeviceAvailable))
+	default:
+		if c.AllowCrossArchEmulation {
+			configurators = append(configurators, kvm.NewKvmDomainConfiguratorWithCrossArch(c.AllowEmulation, c.HypervisorDeviceAvailable, c.AllowCrossArchEmulation, c.HostArchitecture))
+		} else {
+			configurators = append(configurators, kvm.NewKvmDomainConfigurator(c.AllowEmulation, c.HypervisorDeviceAvailable))
+		}
+	}
+
+	builder := convertertypes.NewDomainBuilder(configurators...)
+	if err := builder.Build(vmi, domain); err != nil {
 		return err
 	}
 
@@ -1036,12 +1091,13 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 
 		// NUMA is required in order to use memfd
 		if domain.Spec.CPU.NUMA == nil {
+			memKiB := uint64(vcpu.GetVirtualMemory(vmi).Value() / int64(1024))
 			domain.Spec.CPU.NUMA = &api.NUMA{
 				Cells: []api.NUMACell{
 					{
 						ID:     "0",
 						CPUs:   fmt.Sprintf("0-%d", domain.Spec.VCPU.CPUs-1),
-						Memory: uint64(vcpu.GetVirtualMemory(vmi).Value() / int64(1024)),
+						Memory: &memKiB,
 						Unit:   "KiB",
 					},
 				},
@@ -1077,7 +1133,7 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	prefixMap := newDeviceNamer(vmi.Status.VolumeStatus, vmi.Spec.Domain.Devices.Disks)
 	currentAutoThread := uint(1)
 	currentDedicatedThread := uint(autoThreads + 1)
-	supplementalIOThreads := iothreads.SupplementalPoolThreadCount(vmi)
+	supplementalIOThreads := iothreads.BuildSupplementalPoolIOThreads(vmi)
 	for _, disk := range vmi.Spec.Domain.Devices.Disks {
 		newDisk := api.Disk{}
 		emptyCDRom := false
@@ -1108,7 +1164,7 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			return err
 		}
 
-		if err := Convert_v1_BlockSize_To_api_BlockIO(&disk, &newDisk); err != nil {
+		if err := Convert_v1_BlockSize_To_api_BlockIO(&disk, &newDisk, c.Architecture.GetArchitecture()); err != nil {
 			return err
 		}
 
@@ -1128,48 +1184,42 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		}
 	}
 
-	if c.Architecture.SupportPCIHole64Disabling() && shouldDisablePCIHole64(vmi) {
-		domain.Spec.Devices.Controllers = append(domain.Spec.Devices.Controllers,
-			api.Controller{
-				Type:  "pci",
-				Index: "0",
-				Model: "pcie-root",
-				PCIHole64: &api.PCIHole64{
-					Value: 0,
-					Unit:  "KiB",
-				},
-			},
-		)
+	if err := validateGraceIOVirtualizationConversion(vmi, c); err != nil {
+		return err
 	}
 
-	if vmi.Spec.Domain.CPU != nil {
+	if vmi.Spec.Domain.CPU != nil && vmi.IsCPUDedicated() {
 		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
-		if vmi.IsCPUDedicated() {
-			err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet, hasIOThreads)
-			if err != nil {
-				return err
-			}
+		if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
+			return err
+		}
 
-			if c.PCINUMAAwareTopologyEnabled {
-				if c.Architecture.SupportPCIePlacement() {
-					if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec); err != nil {
-						log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
-					}
-				} else {
-					log.Log.Infof("Skipping PCIe NUMA alignment: architecture %s does not support PCIe placement", c.Architecture.GetArchitecture())
+		if graceIOVirtualizationRequested(c) {
+			return configureGraceIOVirtualization(&domain.Spec, c.GraceHostDeviceAliases, c.IOMMUFDEnabled)
+		}
+
+		if c.PCINUMAAwareTopologyEnabled {
+			if c.Architecture.SupportPCIePlacement() {
+				// Strict PCI placement is tied to the VMI API request. At this
+				// point the request has already been converted into domain NUMA
+				// state, but deriving strictness from the XML shape would make
+				// other NUMATune users strict by accident.
+				strictPCIPlacement := vmi.Spec.Domain.CPU.NUMA != nil &&
+					vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil
+				var opts []PCIPlacementOption
+				if strictPCIPlacement {
+					opts = append(opts, WithStrictPCINUMAPlacement())
 				}
+				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, opts...); err != nil {
+					if strictPCIPlacement {
+						return fmt.Errorf("failed to process strict PCIe NUMA-aware topology: %w", err)
+					}
+					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
+				}
+			} else {
+				log.Log.Infof("Skipping PCIe NUMA alignment: architecture %s does not support PCIe placement", c.Architecture.GetArchitecture())
 			}
 		}
-	}
-
-	if vmi.Spec.Domain.Devices.AutoattachSerialConsole == nil || *vmi.Spec.Domain.Devices.AutoattachSerialConsole {
-		// Add mandatory console device
-		domain.Spec.Devices.Controllers = append(domain.Spec.Devices.Controllers, api.Controller{
-			Type:   "virtio-serial",
-			Index:  "0",
-			Model:  virtio.InterpretTransitionalModelType(&c.UseVirtioTransitional, c.Architecture.GetArchitecture()),
-			Driver: controllerDriver,
-		})
 	}
 
 	if val := vmi.Annotations[v1.PlacePCIDevicesOnRootComplex]; val == "true" {
@@ -1182,25 +1232,39 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		}
 	}
 
-	// In case the RebootPolicy is not set, we rely on libvirt default behavior
-	// that is to reboot the guest silently.
-	if vmi.Spec.Domain.RebootPolicy != nil {
-		switch *vmi.Spec.Domain.RebootPolicy {
-		case v1.RebootPolicyTerminate:
-			domain.Spec.OnReboot = api.DomainOnRebootDestroy
-		case v1.RebootPolicyReboot:
-			domain.Spec.OnReboot = api.DomainOnRebootRestart
-		}
-	}
-
 	return nil
 }
 
-func shouldDisablePCIHole64(vmi *v1.VirtualMachineInstance) bool {
-	if val, ok := vmi.Annotations[v1.DisablePCIHole64]; ok {
-		return strings.EqualFold(val, "true")
+func graceIOVirtualizationRequested(c *convertertypes.ConverterContext) bool {
+	return c != nil && len(c.GraceHostDeviceAliases) > 0
+}
+
+func validateGraceIOVirtualizationConversion(vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext) error {
+	if !graceIOVirtualizationRequested(c) {
+		return nil
 	}
-	return false
+	if !c.GraceIOVirtualizationEnabled {
+		return fmt.Errorf("GraceIOVirtualization conversion requested without the GraceIOVirtualization feature gate")
+	}
+	if !c.PCINUMAAwareTopologyEnabled {
+		return fmt.Errorf("GraceIOVirtualization requires PCINUMAAwareTopology for PCI placement")
+	}
+	if !c.IOMMUFDEnabled {
+		return fmt.Errorf("GraceIOVirtualization requires an IOMMUFD file descriptor in virt-launcher")
+	}
+	if vmi.Spec.Domain.CPU == nil || !vmi.IsCPUDedicated() {
+		return fmt.Errorf("GraceIOVirtualization requires dedicated CPU placement")
+	}
+	if !c.Architecture.SupportPCIePlacement() {
+		return fmt.Errorf("GraceIOVirtualization requires PCIe placement support on architecture %s", c.Architecture.GetArchitecture())
+	}
+	if vmi.Annotations[v1.DisablePCIHole64] == "true" {
+		return fmt.Errorf("GraceIOVirtualization requires the 64-bit PCI hole")
+	}
+	if vmi.Annotations[v1.PlacePCIDevicesOnRootComplex] == "true" {
+		return fmt.Errorf("GraceIOVirtualization cannot be combined with PCI root-complex placement")
+	}
+	return nil
 }
 
 func getPrefixFromBus(bus v1.DiskBus) string {
@@ -1272,4 +1336,31 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 		gracePeriodSeconds = *vmi.Spec.TerminationGracePeriodSeconds
 	}
 	return gracePeriodSeconds
+}
+
+func convertCmdv1SMBIOSToComputeSMBIOS(input *cmdv1.SMBios) *compute.SMBIOS {
+	if input == nil {
+		return nil
+	}
+
+	return &compute.SMBIOS{
+		Manufacturer: input.Manufacturer,
+		Product:      input.Product,
+		Version:      input.Version,
+		SKU:          input.Sku,
+		Family:       input.Family,
+	}
+}
+
+func convertEFIConfiguration(input *convertertypes.EFIConfiguration) *compute.EFIConfiguration {
+	if input == nil {
+		return nil
+	}
+
+	return &compute.EFIConfiguration{
+		EFICode:                   input.EFICode,
+		EFIVars:                   input.EFIVars,
+		SecureLoader:              input.SecureLoader,
+		UsesFirmwareAutoSelection: input.UsesFirmwareAutoSelection,
+	}
 }

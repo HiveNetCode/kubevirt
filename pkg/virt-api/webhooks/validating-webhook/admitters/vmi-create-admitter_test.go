@@ -80,8 +80,25 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = featureGates
 		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
 	}
+	disableDeclarativeHotplugFeatureGate := func() {
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{
+					DeveloperConfiguration: &v1.DeveloperConfiguration{
+						FeatureGates:         make([]string, 0),
+						DisabledFeatureGates: []string{featuregate.DeclarativeHotplugVolumesGate},
+					},
+				},
+			},
+		})
+	}
 	disableFeatureGates := func() {
 		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kv)
+	}
+	disableSEVFeatureGate := func() {
+		kvConfig := kv.DeepCopy()
+		kvConfig.Spec.Configuration.DeveloperConfiguration.DisabledFeatureGates = []string{featuregate.WorkloadEncryptionSEV}
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
 	}
 
 	updateDefaultArchitecture := func(defaultArchitecture string) {
@@ -184,6 +201,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	},
 		Entry("when path is not absolute", "a/b/c", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
 		Entry("when path contains relative components", "/a/b/c/../d", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
+		Entry("when path starts with relative components", "../test", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
 		Entry("when path is root", "/", "spec.volumes[0].containerDisk must not point to root"),
 	)
 
@@ -546,6 +564,49 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Field).To(Equal("fake.subdomain"))
 		})
 
+		It("should accept valid serviceAccountName", func() {
+			vmi.Spec.ServiceAccountName = "my-service-account"
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(BeEmpty())
+		})
+
+		It("should reject invalid serviceAccountName", func() {
+			vmi.Spec.ServiceAccountName = "bad+name"
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.serviceAccountName"))
+		})
+
+		It("should accept serviceAccountName matching serviceAccount volume", func() {
+			vmi.Spec.ServiceAccountName = "my-sa"
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "sa-vol",
+				VolumeSource: v1.VolumeSource{
+					ServiceAccount: &v1.ServiceAccountVolumeSource{ServiceAccountName: "my-sa"},
+				},
+			})
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(BeEmpty())
+		})
+
+		It("should reject serviceAccountName conflicting with serviceAccount volume", func() {
+			vmi.Spec.ServiceAccountName = "sa-one"
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "sa-vol",
+				VolumeSource: v1.VolumeSource{
+					ServiceAccount: &v1.ServiceAccountVolumeSource{ServiceAccountName: "sa-two"},
+				},
+			})
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.serviceAccountName"))
+			Expect(causes[0].Message).To(ContainSubstring("must reference the same service account"))
+		})
+
 		It("should reject disk with missing volume", func() {
 			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
 				Name: "testdisk",
@@ -585,6 +646,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				Name: "testdisk",
 			})
 
+			disableDeclarativeHotplugFeatureGate()
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Message).To(Equal(fmt.Sprintf("%s feature gate not enabled, cannot define an empty CD-ROM disk", featuregate.DeclarativeHotplugVolumesGate)))
@@ -1273,6 +1335,78 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Field).To(Equal("fake.HostDevices"))
 		})
 
+		It("should reject duplicate claimName/requestName between DRA network and DRA GPU", func() {
+			enableFeatureGates(featuregate.NetworkDevicesWithDRAGate, featuregate.GPUsWithDRAGate)
+			defer disableFeatureGates()
+			vmi := api.NewMinimalVMI("testvm")
+			vmi.Spec.Networks = []v1.Network{
+				{
+					Name: "dra-net",
+					NetworkSource: v1.NetworkSource{
+						ResourceClaim: &v1.ClaimRequest{
+							ClaimName:   "claim1",
+							RequestName: "vf",
+						},
+					},
+				},
+			}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
+				{Name: "dra-net", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &v1.InterfaceSRIOV{}}},
+			}
+			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+				{
+					Name: "gpu1",
+					ClaimRequest: &v1.ClaimRequest{
+						ClaimName:   "claim1",
+						RequestName: "vf",
+					},
+				},
+			}
+			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
+				{Name: "claim1", ResourceClaimName: pointer.P("claim1")},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("duplicate claimName/requestName"))
+			Expect(causes[0].Message).To(ContainSubstring("between GPUs[0] and Networks[0]"))
+		})
+
+		It("should reject duplicate claimName/requestName between DRA network and DRA HostDevice", func() {
+			enableFeatureGates(featuregate.NetworkDevicesWithDRAGate, featuregate.HostDevicesGate, featuregate.HostDevicesWithDRAGate)
+			defer disableFeatureGates()
+			vmi := api.NewMinimalVMI("testvm")
+			vmi.Spec.Networks = []v1.Network{
+				{
+					Name: "dra-net",
+					NetworkSource: v1.NetworkSource{
+						ResourceClaim: &v1.ClaimRequest{
+							ClaimName:   "claim1",
+							RequestName: "vf",
+						},
+					},
+				},
+			}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
+				{Name: "dra-net", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &v1.InterfaceSRIOV{}}},
+			}
+			vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{
+				{
+					Name: "hostdev1",
+					ClaimRequest: &v1.ClaimRequest{
+						ClaimName:   "claim1",
+						RequestName: "vf",
+					},
+				},
+			}
+			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
+				{Name: "claim1", ResourceClaimName: pointer.P("claim1")},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("duplicate claimName/requestName"))
+			Expect(causes[0].Message).To(ContainSubstring("between HostDevices[0] and Networks[0]"))
+		})
+
 		It("should accept host devices that are not permitted in the hostdev config", func() {
 			kvConfig := kv.DeepCopy()
 			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{featuregate.HostDevicesGate}
@@ -1430,17 +1564,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 
 		Context("with panic devices defined", func() {
-			It("should fail when PanicDevices featuregate is disabled", func() {
-				vmi := api.NewMinimalVMI("testvm")
-				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Hyperv)}}
-				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-				Expect(causes).To(HaveLen(1))
-				Expect(causes[0].Field).To(Equal("fake.domain.devices.panicDevices"))
-				Expect(causes[0].Message).To(Equal("Panic Devices feature gate is not enabled in kubevirt-config"))
-			})
-
 			It("should allow valid panic device model", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Hyperv)}}
 				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -1448,7 +1572,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			It("should reject invalid panic device model", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				panicDeviceModel := v1.PanicDeviceModel("bad")
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: &panicDeviceModel}}
@@ -1459,7 +1582,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			It("should reject panic devices on s390x architecture", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				vmi.Spec.Architecture = "s390x"
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Isa)}}
@@ -2622,7 +2744,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 
 		It("should reject when the feature gate is disabled", func() {
-			disableFeatureGates()
+			disableSEVFeatureGate()
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Message).To(ContainSubstring(fmt.Sprintf("%s feature gate is not enabled", featuregate.WorkloadEncryptionSEV)))
@@ -2663,7 +2785,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
 			bootOrder := uint(1)
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
-				{Name: vmi.Spec.Networks[0].Name, BootOrder: &bootOrder},
+				{Name: vmi.Spec.Networks[0].Name, BootOrder: &bootOrder, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}},
 			}
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(HaveLen(len(vmi.Spec.Domain.Devices.Interfaces)))
@@ -2705,7 +2827,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			It("should reject when the feature gate is disabled", func() {
-				disableFeatureGates()
+				disableSEVFeatureGate()
 				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 				Expect(causes).To(HaveLen(1))
 				Expect(causes[0].Message).To(ContainSubstring(fmt.Sprintf("%s feature gate is not enabled", featuregate.WorkloadEncryptionSEV)))
@@ -2743,17 +2865,9 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi.Spec.Architecture = "s390x"
 		})
 
-		It("should accept when the feature gate is enabled", func() {
-			enableFeatureGates(featuregate.SecureExecution)
+		It("should accept", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(BeEmpty())
-		})
-
-		It("should reject when the feature gate is disabled", func() {
-
-			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-			Expect(causes).To(HaveLen(1))
-			Expect(causes[0].Message).To(ContainSubstring(fmt.Sprintf("%s feature gate is not enabled", featuregate.SecureExecution)))
 		})
 	})
 
@@ -2785,6 +2899,23 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(HaveLen(1))
 			Expect(causes[0].Message).To(ContainSubstring("TDX does not work along with SMM"))
+		})
+
+		It("should accept SecureBoot without SMM", func() {
+			vmi.Spec.Domain.Firmware = &v1.Firmware{
+				Bootloader: &v1.Bootloader{
+					EFI: &v1.EFI{
+						SecureBoot: pointer.P(true),
+					},
+				},
+			}
+			vmi.Spec.Domain.Features = &v1.Features{
+				SMM: &v1.FeatureState{
+					Enabled: pointer.P(false),
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(BeEmpty())
 		})
 
 		It("should reject when SEV is set", func() {
@@ -2832,7 +2963,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
 			bootOrder := uint(1)
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
-				{Name: vmi.Spec.Networks[0].Name, BootOrder: &bootOrder},
+				{Name: vmi.Spec.Networks[0].Name, BootOrder: &bootOrder, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}},
 			}
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(HaveLen(len(vmi.Spec.Domain.Devices.Interfaces)))
@@ -3532,12 +3663,23 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 		}
 
+		enablePersistentReservation := func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.PersistentReservationConfiguration = &v1.PersistentReservationConfiguration{
+				Enabled: pointer.P(true),
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
+		}
+
 		BeforeEach(func() {
 			vmi = api.NewMinimalVMI("testvmi")
-			enableFeatureGates(featuregate.PersistentReservation)
 		})
 
-		Context("feature gate enabled", func() {
+		Context("persistent reservation enabled", func() {
+			BeforeEach(func() {
+				enablePersistentReservation()
+			})
+
 			It("should accept vmi with no persistent reservation defined", func() {
 				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 				Expect(causes).To(BeEmpty())
@@ -3550,13 +3692,12 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 		})
 
-		Context("feature gate disabled", func() {
-			It("should reject when the feature gate is disabled", func() {
-				disableFeatureGates()
+		Context("persistent reservation disabled", func() {
+			It("should reject when persistent reservation is disabled", func() {
 				addLunDiskWithPersistentReservation(vmi)
 				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 				Expect(causes).To(HaveLen(1))
-				Expect(causes[0].Message).To(ContainSubstring(fmt.Sprintf("%s feature gate is not enabled", featuregate.PersistentReservation)))
+				Expect(causes[0].Message).To(Equal("persistent reservation is not enabled in kubevirt config"))
 			})
 		})
 	})
@@ -3730,22 +3871,12 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	Context("with VideoConfig", func() {
 		var vmi *v1.VirtualMachineInstance
 		BeforeEach(func() {
-			enableFeatureGates(featuregate.VideoConfig)
 			vmi = libvmi.New(libvmi.WithArchitecture(runtime.GOARCH), libvmi.WithVideo(v1.VirtIO))
 		})
 
-		It("should accept video configuration with feature gate enabled", func() {
+		It("should accept video configuration", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(causes).To(BeEmpty(), "should accept video configuration with valid setup")
-		})
-
-		It("should reject when the feature gate is disabled", func() {
-			disableFeatureGates()
-			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-			Expect(causes).To(HaveLen(1))
-			Expect(causes[0].Type).To(Equal(metav1.CauseTypeFieldValueInvalid))
-			Expect(causes[0].Message).To(Equal(fmt.Sprintf("Video configuration is specified but the %s feature gate is not enabled", featuregate.VideoConfig)))
-			Expect(causes[0].Field).To(Equal("fake.video"))
 		})
 
 		It("should reject when autoattachGraphicsDevice is set to false", func() {
@@ -3817,7 +3948,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 
 	Context("with RebootPolicy", func() {
 		It("should accept rebootPolicy when feature gate is enabled", func() {
-			enableFeatureGates(featuregate.RebootPolicy)
+			// Enabled by default
 			vmi := libvmi.New(
 				libvmi.WithArchitecture(runtime.GOARCH),
 				libvmi.WithResourceMemory("128M"),
@@ -3829,7 +3960,10 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 
 		It("should reject rebootPolicy when feature gate is disabled", func() {
-			disableFeatureGates()
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.DisabledFeatureGates = []string{featuregate.RebootPolicy}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
+
 			vmi := libvmi.New(
 				libvmi.WithArchitecture(runtime.GOARCH),
 				libvmi.WithResourceMemory("128M"),
@@ -3869,19 +4003,20 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi := libvmi.New(
 				libvmi.WithArchitecture(runtime.GOARCH),
 				libvmi.WithResourceMemory("128M"),
+				libvmi.WithResourceClaim(v1.VirtualMachineInstanceResourceClaim{
+					Name:              "my-gpu-claim",
+					ResourceClaimName: pointer.P("my-gpu-claim"),
+				}),
 			)
 			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
 				{
 					Name:       "gpu",
 					DeviceName: "nvidia-gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("my-gpu-claim"),
-						RequestName: pointer.P("request-1"),
+						ClaimName:   "my-gpu-claim",
+						RequestName: "request-1",
 					},
 				},
-			}
-			vmi.Spec.ResourceClaims = []k8sv1.PodResourceClaim{
-				{Name: "my-gpu-claim"},
 			}
 
 			ar, err := newAdmissionReviewForVMICreation(vmi)
@@ -3893,18 +4028,28 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 
 		It("should reject a DRA-GPU when the feature-gate is NOT enabled", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.DisabledFeatureGates = []string{featuregate.GPUsWithDRAGate}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
+			defer disableFeatureGates()
+
 			vmi := libvmi.New()
 			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
 				{
 					Name: "gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("my-gpu-claim"),
-						RequestName: pointer.P("request-1"),
+						ClaimName:   "my-gpu-claim",
+						RequestName: "request-1",
 					},
 				},
 			}
 
-			vmi.Spec.ResourceClaims = []k8sv1.PodResourceClaim{{Name: "my-gpu-claim"}}
+			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
+				{
+					Name:              "my-gpu-claim",
+					ResourceClaimName: pointer.P("my-gpu-claim"),
+				},
+			}
 
 			ar, err := newAdmissionReviewForVMICreation(vmi)
 			Expect(err).ToNot(HaveOccurred())
@@ -3922,8 +4067,8 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				{
 					Name: "gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("my-gpu-claim"),
-						RequestName: pointer.P("request-1"),
+						ClaimName:   "my-gpu-claim",
+						RequestName: "request-1",
 					},
 				},
 			}
@@ -3947,13 +4092,16 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				{
 					Name: "gpu",
 					ClaimRequest: &v1.ClaimRequest{
-						ClaimName:   pointer.P("my-gpu-claim"),
-						RequestName: pointer.P("request-1"),
+						ClaimName:   "my-gpu-claim",
+						RequestName: "request-1",
 					},
 				},
 			}
-			vmi.Spec.ResourceClaims = []k8sv1.PodResourceClaim{
-				{Name: "my-gpu-claim"},
+			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
+				{
+					Name:              "my-gpu-claim",
+					ResourceClaimName: pointer.P("my-gpu-claim"),
+				},
 			}
 
 			ar, err := newAdmissionReviewForVMICreation(vmi)
@@ -3977,7 +4125,7 @@ var _ = Describe("additional tests", func() {
 			Name: "testnet",
 		}
 		order := uint(1)
-		iface := v1.Interface{Name: net.Name, BootOrder: &order}
+		iface := v1.Interface{Name: net.Name, BootOrder: &order, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}
 		spec.Networks = []v1.Network{net}
 		spec.Domain.Devices.Interfaces = []v1.Interface{iface}
 		causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), spec, config)
@@ -3993,7 +4141,7 @@ var _ = Describe("additional tests", func() {
 			Name: "testnet",
 		}
 		order := uint(0)
-		iface := v1.Interface{Name: net.Name, BootOrder: &order}
+		iface := v1.Interface{Name: net.Name, BootOrder: &order, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}
 		spec.Networks = []v1.Network{net}
 		spec.Domain.Devices.Interfaces = []v1.Interface{iface}
 		causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), spec, config)
@@ -4010,7 +4158,7 @@ var _ = Describe("additional tests", func() {
 			Name: "testnet",
 		}
 		order1 := uint(7)
-		iface := v1.Interface{Name: net.Name, BootOrder: &order1}
+		iface := v1.Interface{Name: net.Name, BootOrder: &order1, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}
 		spec.Networks = []v1.Network{net}
 		spec.Domain.Devices.Interfaces = []v1.Interface{iface}
 		order2 := uint(77)
@@ -4045,7 +4193,7 @@ var _ = Describe("additional tests", func() {
 			Name: "testnet",
 		}
 		order := uint(7)
-		iface := v1.Interface{Name: net.Name, BootOrder: &order}
+		iface := v1.Interface{Name: net.Name, BootOrder: &order, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}
 		spec.Networks = []v1.Network{net}
 		spec.Domain.Devices.Interfaces = []v1.Interface{iface}
 		disk := v1.Disk{

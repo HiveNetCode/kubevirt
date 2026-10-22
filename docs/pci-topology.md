@@ -7,7 +7,15 @@ Each device (disk, network interface, controller, etc.) occupies one root port.
 To support hotplugging devices after boot, empty root ports must be reserved
 at VM creation time — libvirt does not allow adding root ports to a running VM.
 
-The number and method of reserving these ports directly affects the PCI bus
+**Scope**: PCI topology management only applies to machine types with PCIe bus
+hierarchies — **q35** (amd64) and **virt** (arm64). It is skipped for
+architectures with flat bus topologies (**s390x** CCW/zPCI, **ppc64le** SPAPR)
+and for non-PCIe machine types like **i440fx**. All PCI topology logic
+(annotation setting, placeholder allocation, detection) is gated by the
+`defaults.SupportsPCIeHotplug()` helper, which checks both architecture and
+machine type.
+
+The number and method of reserving these ports directly affect the PCI bus
 addresses assigned to devices. If the reservation strategy changes across a
 reboot, devices shift to different PCI addresses. This breaks:
 
@@ -135,14 +143,13 @@ Two annotations control PCI topology behavior:
 
 | Annotation | Values | Set by | Purpose |
 |---|---|---|---|
-| `kubevirt.io/pci-topology-version` | `v2`, `v3` | Webhook, virt-handler | Documents which topology scheme is in use |
-| `kubevirt.io/pci-interface-slot-count` | Integer string (e.g. `"11"`) | virt-handler | Frozen total of placeholders + boot-time interfaces for v2 VMs |
+| `kubevirt.io/pci-topology-version` | `v2`, `v3` | Webhook | Documents which topology scheme is in use |
+| `kubevirt.io/pci-interface-slot-count` | Integer string (e.g. `"11"`) | virt-handler (1.6-1.8 only) | Frozen total of placeholders + boot-time interfaces for v2 VMs |
 
 ### Who Sets What
 
-- **VMI mutating webhook** (CREATE): Sets version to `v3` if absent
-- **VM mutating webhook** (CREATE): Sets version to `v3` on template if absent
-- **virt-handler**: Detects version for running VMIs without annotation (upgrade window only), sets `v2` + placeholder count or `v3`
+- **VMI mutating webhook** (CREATE): Sets version to `v3` if absent (skipped for s390x/ppc64le)
+- **VM mutating webhook** (CREATE): Sets version to `v3` on template if absent (skipped for s390x/ppc64le)
 - **virt-controller**: Propagates annotations from VMI to VM template (one-time, only when VM template has no version annotation)
 
 ### Annotation Flow
@@ -162,51 +169,29 @@ virt-launcher reads VMI annotations
 
 ## Upgrade Behavior
 
-### Running v1 VM (no annotation)
+### Pre-v2 VM (no annotation)
 
-1. virt-handler inspects domain XML
-2. Detects placeholder count matches v1 formula → annotates VMI as `v3`
-3. virt-controller propagates `v3` to VM template
-4. Next boot: uses v1 placeholders + controllers → same addresses
+1. Starts → webhook sets `v3` (v3 uses the same v1 placeholder formula)
+2. Uses v1 placeholders + extra controllers → same device addresses, more hotplug capacity
 
-### Running v2 VM (no annotation)
+### v2 VM (with annotation and frozen slot count)
 
-1. virt-handler inspects domain XML
-2. Detects placeholder count differs from v1 formula → annotates VMI as `v2` with frozen slot count (placeholders + boot-time interfaces)
-3. virt-controller propagates `v2` + slot count to VM template
-4. Next boot: derives placeholders as `max(0, slotCount - currentInterfaces)` → same addresses
-5. Adding/removing interfaces while stopped is absorbed: the slot count stays constant, placeholder count adjusts automatically
+The latest 1.6-1.8 releases include virt-handler detection logic that
+annotates running v2 VMs with the frozen slot count. If those annotations
+are present, they are preserved:
 
-### Stopped v1 VM
+1. Starts → webhook sees existing annotation, does not override
+2. Uses frozen slot count to derive placeholders → same addresses
 
-1. Starts → webhook sets `v3` (v3 is compatible with v1)
-2. Uses v1 placeholders + controllers → same addresses
+### v2 VM (without annotation)
 
-### Stopped v2 VM
+VMs created with v2 topology that were never annotated (e.g. upgraded
+directly to 1.9+ without going through the latest 1.6-1.8 releases)
+will get v3 on next boot:
 
-1. Starts → webhook sets `v3` (no running domain to detect v2)
-2. Uses v1 placeholders → **one-time address shift**
+1. Starts → webhook sets `v3` (no annotation to preserve)
+2. Uses v1 placeholder formula → **one-time address shift**
 3. Acceptable since v2 was already unstable across spec changes
-
-## Detection Logic
-
-virt-handler distinguishes v1 from v2 by comparing the detected placeholder
-count in the running domain against the v1 formula result:
-
-1. Count pcie-root-port controllers in domain XML
-2. Identify which root port buses have devices attached
-3. Find the highest occupied bus
-4. Count empty root ports at or below that bus (ports above are libvirt spares)
-5. Add back hotplugged devices that consumed root ports at runtime:
-   - Hotplugged volumes are identified via `HotplugVolume` on VMI volume status
-   - Hotplugged interfaces are identified by comparing current VMI interfaces
-     against the boot-time VM spec in the ControllerRevision
-6. Compare result to v1 formula: `max(0, 4 - len(interfaces))`
-7. If different → v2. If same → v1 (annotate as v3).
-
-For >2GB VMs this is always distinguishable: v1 gives 0-3, v2 gives ≥6.
-For ≤2GB VMs both can give 3 — but that's harmless since the placeholder
-count is the same either way.
 
 ## Clone and Snapshot Restore
 
@@ -235,11 +220,11 @@ relative to the source. This is user-initiated and expected.
 
 | File | Purpose |
 |---|---|
+| `pkg/defaults/defaults.go` | `SupportsPCIeHotplug` architecture gate |
 | `staging/src/kubevirt.io/api/core/v1/types.go` | Annotation constants |
 | `pkg/virt-launcher/virtwrap/manager.go` | `allocateHotplugPorts`, formulas, controller addition |
 | `pkg/virt-launcher/virtwrap/network/nichotplug.go` | `WithNetworkIfacesResources` (two-pass define) |
 | `pkg/virt-launcher/virtwrap/converter/pci-placement.go` | `CountPCIDevices` |
 | `pkg/virt-api/webhooks/mutating-webhook/mutators/vmi-mutator.go` | VMI webhook |
 | `pkg/virt-api/webhooks/mutating-webhook/mutators/vm-mutator.go` | VM webhook |
-| `pkg/virt-handler/pci_topology.go` | Detection logic |
 | `pkg/virt-controller/watch/vm/vm.go` | Annotation propagation |

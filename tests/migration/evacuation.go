@@ -54,7 +54,7 @@ import (
 var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.RequiresTwoSchedulableNodes, func() {
 	Context("during evacuation", func() {
 		It("should add eviction-in-progress annotation to source virt-launcher pod", func() {
-			vmi := libvmifact.NewAlpine(
+			vmi := libvmifact.NewGuestless(
 				libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 				libvmi.WithNetwork(v1.DefaultPodNetwork()),
 				libvmi.WithEvictionStrategy(v1.EvictionStrategyLiveMigrate),
@@ -108,7 +108,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 		Context("when evacuating fails", func() {
 			var vmi *v1.VirtualMachineInstance
 			BeforeEach(func() {
-				vmi = libvmifact.NewAlpine(
+				vmi = libvmifact.NewGuestless(
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 					libvmi.WithAnnotation(v1.FuncTestForceLauncherMigrationFailureAnnotation, ""),
@@ -116,7 +116,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 				)
 			})
 
-			It("should not remove eviction-in-progress annotation from source virt-launcher pod", func() {
+			It("should not remove eviction-in-progress annotation from source virt-launcher pod", decorators.WgS390x, func() {
 				By("Starting the VirtualMachineInstance")
 				vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsHuge)
 
@@ -182,7 +182,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 				events.ExpectEvent(vmi, k8sv1.EventTypeWarning, controller.MigrationBackoffReason)
 			})
 
-			It("after a successful migration backoff should be cleared", func() {
+			It("after a successful migration backoff should be cleared", decorators.WgS390x, func() {
 				By("Starting the VirtualMachineInstance")
 				vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsHuge)
 
@@ -216,7 +216,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 
 		Context("VirtualMachineInstanceEvictionRequested condition", func() {
 			It("should set VirtualMachineInstanceEvictionRequested condition when VMI marked for eviction", func() {
-				vmi := libvmifact.NewCirros(
+				vmi := libvmifact.NewGuestless(
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 					libvmi.WithEvictionStrategy(v1.EvictionStrategyLiveMigrate),
@@ -267,7 +267,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 
 				It("should keep VirtualMachineInstanceEvictionRequested condition when migration fails", func() {
 					By("Starting the VirtualMachineInstance")
-					vmi := libvmifact.NewCirros(
+					vmi := libvmifact.NewGuestless(
 						libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 						libvmi.WithNetwork(v1.DefaultPodNetwork()),
 						libvmi.WithAnnotation(v1.FuncTestForceLauncherMigrationFailureAnnotation, ""),
@@ -308,7 +308,7 @@ var _ = Describe(SIG("VM Live Migration triggered by evacuation", decorators.Req
 
 	})
 
-	Context("Evacuation cancellation behavior", func() {
+	Context("Evacuation cancellation behavior", decorators.WgS390x, func() {
 		var migrationBandwidthLimit = resource.MustParse("1Ki")
 
 		It("should stop recreating migrations after evacuate-cancel", func() {

@@ -33,7 +33,8 @@ import (
 var _ = Describe("Controllers Domain Configurator", func() {
 
 	const (
-		usbNeeded = true
+		usbNeeded                   = true
+		pciHole64DisablingSupported = true
 	)
 
 	DescribeTable("should configure USB and SCSI controllers", func(vmi *v1.VirtualMachineInstance, isUSBNeeded bool, autoThreads int, expectedControllers []api.Controller) {
@@ -44,6 +45,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			compute.ControllersWithSCSIModel("test-model"),
 			compute.ControllersWithSCSIIOThreads(uint(autoThreads)),
 			compute.ControllersWithControllerDriver(nil),
+			compute.ControllersWithVirtioSerialModel("virtio-test-model"),
 		).Configure(vmi, &domain)).To(Succeed())
 
 		expectedDomain := api.Domain{
@@ -61,6 +63,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			0,
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when USB is needed and disk hotplug is disabled",
 			libvmi.New(withHotplugDisabled()),
@@ -68,6 +71,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			0,
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "qemu-xhci"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when USB is NOT needed and disk hotplug is enabled",
 			libvmi.New(),
@@ -76,6 +80,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when USB is needed and disk hotplug is enabled",
 			libvmi.New(),
@@ -84,6 +89,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "qemu-xhci"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk and disk hotplug is disabled",
 			libvmi.New(withHotplugDisabled(), libvmi.WithDisk("scsi-disk", v1.DiskBusSCSI)),
@@ -92,6 +98,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk and disk hotplug is enabled",
 			libvmi.New(libvmi.WithDisk("scsi-disk", v1.DiskBusSCSI)),
@@ -100,6 +107,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk and USB is needed",
 			libvmi.New(libvmi.WithDisk("scsi-disk", v1.DiskBusSCSI)),
@@ -108,6 +116,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "qemu-xhci"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk with dedicatedIOThread and Virtio disk, VMI has 4 shared IO threads",
 			libvmi.New(
@@ -119,6 +128,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model", Driver: &api.ControllerDriver{Queues: pointer.P[uint](1), IOThread: pointer.P[uint](2)}},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk with dedicatedIOThread and Virtio disks, VMI has 2 shared IO threads, should roll over controller thread",
 			libvmi.New(
@@ -131,6 +141,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model", Driver: &api.ControllerDriver{Queues: pointer.P[uint](1), IOThread: pointer.P[uint](1)}},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has multiple SCSI disks with dedicatedIOThread, VMI has 4 shared IO threads",
 			libvmi.New(
@@ -142,6 +153,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model", Driver: &api.ControllerDriver{Queues: pointer.P[uint](1), IOThread: pointer.P[uint](1)}},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk with dedicatedIOThread and VMI has no IOThreads",
 			libvmi.New(libvmi.WithDisk("scsi-disk", v1.DiskBusSCSI)),
@@ -150,6 +162,7 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
 			}),
 		Entry("when VMI has SCSI disk without dedicatedIOThread and VMI has IOThreads",
 			libvmi.New(libvmi.WithDisk("scsi-disk", v1.DiskBusSCSI)),
@@ -158,9 +171,114 @@ var _ = Describe("Controllers Domain Configurator", func() {
 			[]api.Controller{
 				{Type: "usb", Index: "0", Model: "none"},
 				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+	)
+
+	DescribeTable("should configure PCI controller based on arch support and annotation", func(vmi *v1.VirtualMachineInstance, supportPCIHole64Disabling bool, expectedControllers []api.Controller) {
+		var domain api.Domain
+
+		configurator := compute.NewControllersDomainConfigurator(
+			compute.ControllersWithUSBNeeded(!usbNeeded),
+			compute.ControllersWithSCSIModel("test-model"),
+			compute.ControllersWithSCSIIOThreads(0),
+			compute.ControllersWithControllerDriver(nil),
+			compute.ControllersWithSupportPCIHole64Disabling(supportPCIHole64Disabling),
+			compute.ControllersWithVirtioSerialModel("virtio-test-model"),
+		)
+		Expect(configurator.Configure(vmi, &domain)).To(Succeed())
+
+		Expect(domain).To(Equal(newDomainWithControllers(expectedControllers)))
+	},
+		Entry("when arch does not support PCIHole64 disabling, annotation not set",
+			libvmi.New(),
+			!pciHole64DisablingSupported,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when arch does not support PCIHole64 disabling, annotation set",
+			libvmi.New(libvmi.WithAnnotation(v1.DisablePCIHole64, "true")),
+			!pciHole64DisablingSupported,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when arch supports PCIHole64 disabling, annotation not set",
+			libvmi.New(),
+			pciHole64DisablingSupported,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when arch supports PCIHole64 disabling, annotation set to false",
+			libvmi.New(libvmi.WithAnnotation(v1.DisablePCIHole64, "false")),
+			pciHole64DisablingSupported,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when arch supports PCIHole64 disabling and annotation is true",
+			libvmi.New(libvmi.WithAnnotation(v1.DisablePCIHole64, "true")),
+			pciHole64DisablingSupported,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "scsi", Index: "0", Model: "test-model"},
+				{Type: "pci", Index: "0", Model: "pcie-root", PCIHole64: &api.PCIHole64{Value: 0, Unit: "KiB"}},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+	)
+
+	DescribeTable("should configure virtio-serial controller based on serial console setting", func(vmiOpts []libvmi.Option, expectedControllers []api.Controller) {
+		var domain api.Domain
+
+		// withHotplugDisabled() is applied to all entries to prevent the SCSI controller
+		// from being added (hotplug enabled triggers SCSI), keeping the test focused on the
+		// virtio-serial controller only.
+		vmi := libvmi.New(append([]libvmi.Option{withHotplugDisabled()}, vmiOpts...)...)
+
+		configurator := compute.NewControllersDomainConfigurator(
+			compute.ControllersWithUSBNeeded(!usbNeeded),
+			compute.ControllersWithVirtioSerialModel("virtio-test-model"),
+			compute.ControllersWithControllerDriver(nil),
+		)
+		Expect(configurator.Configure(vmi, &domain)).To(Succeed())
+
+		Expect(domain).To(Equal(newDomainWithControllers(expectedControllers)))
+	},
+		Entry("when serial console is enabled by default (nil)",
+			nil,
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when serial console is explicitly enabled",
+			[]libvmi.Option{libvmi.WithAutoattachSerialConsole(true)},
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
+				{Type: "virtio-serial", Index: "0", Model: "virtio-test-model"},
+			}),
+		Entry("when serial console is disabled",
+			[]libvmi.Option{libvmi.WithAutoattachSerialConsole(false)},
+			[]api.Controller{
+				{Type: "usb", Index: "0", Model: "none"},
 			}),
 	)
 })
+
+func newDomainWithControllers(controllers []api.Controller) api.Domain {
+	return api.Domain{
+		Spec: api.DomainSpec{
+			Devices: api.Devices{
+				Controllers: controllers,
+			},
+		},
+	}
+}
 
 func withHotplugDisabled() libvmi.Option {
 	return func(vmi *v1.VirtualMachineInstance) {
