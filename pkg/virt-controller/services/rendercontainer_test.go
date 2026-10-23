@@ -49,6 +49,32 @@ var _ = Describe("Container spec renderer", func() {
 		})
 	})
 
+	Context("with passt sandbox permissions option", func() {
+		BeforeEach(func() {
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy, WithPasstSandboxPermissions())
+		})
+
+		It("should set unconfined AppArmor and seccomp profiles on the container", func() {
+			securityContext := specRenderer.Render(exampleCommand).SecurityContext
+			Expect(securityContext.AppArmorProfile).To(
+				BeEquivalentTo(&k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}))
+			Expect(securityContext.SeccompProfile).To(
+				BeEquivalentTo(&k8sv1.SeccompProfile{Type: k8sv1.SeccompProfileTypeUnconfined}))
+		})
+	})
+
+	Context("without passt sandbox permissions option", func() {
+		BeforeEach(func() {
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy)
+		})
+
+		It("should not set AppArmor or seccomp profiles on the container", func() {
+			securityContext := specRenderer.Render(exampleCommand).SecurityContext
+			Expect(securityContext.AppArmorProfile).To(BeNil())
+			Expect(securityContext.SeccompProfile).To(BeNil())
+		})
+	})
+
 	Context("vmi capabilities", func() {
 		allowedCapabilities := []k8sv1.Capability{
 			CAP_NET_BIND_SERVICE,

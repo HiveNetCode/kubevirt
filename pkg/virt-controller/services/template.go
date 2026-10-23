@@ -837,6 +837,12 @@ func (t *TemplateService) newContainerSpecRenderer(vmi *v1.VirtualMachineInstanc
 		WithPorts(vmi),
 		WithCapabilities(vmi),
 	}
+	// passt sandboxes itself (unprivileged userns + remount of /), which the
+	// runtime default seccomp/AppArmor profiles deny; unconfine the compute
+	// container when the PasstBinding gate is on (COMP-4086, kubevirt#12333).
+	if t.clusterConfig.PasstBindingEnabled() {
+		computeContainerOpts = append(computeContainerOpts, WithPasstSandboxPermissions())
+	}
 	if util.IsNonRootVMI(vmi) {
 		computeContainerOpts = append(computeContainerOpts, WithNonRoot(userId))
 		computeContainerOpts = append(computeContainerOpts, WithDropALLCapabilities())
