@@ -1,5 +1,11 @@
 name: Build Hive KubeVirt Images
 
+# Serialise builds per image tag so concurrent dispatches cannot push to the
+# same registry tag simultaneously (COMP-4086).
+concurrency:
+  group: hive-images-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
