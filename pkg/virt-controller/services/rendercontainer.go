@@ -33,6 +33,8 @@ type ContainerSpecRenderer struct {
 	readinessProbe    *k8sv1.Probe
 	ports             []k8sv1.ContainerPort
 	capabilities      *k8sv1.Capabilities
+	appArmorProfile   *k8sv1.AppArmorProfile
+	seccompProfile    *k8sv1.SeccompProfile
 	args              []string
 	extraEnvVars      []k8sv1.EnvVar
 }
@@ -52,11 +54,19 @@ func NewContainerSpecRenderer(containerName string, launcherImg string, imgPullP
 }
 
 func (csr *ContainerSpecRenderer) Render(cmd []string) k8sv1.Container {
+	securityContext := securityContext(csr.userID, csr.capabilities)
+	if csr.appArmorProfile != nil {
+		securityContext.AppArmorProfile = csr.appArmorProfile
+	}
+	if csr.seccompProfile != nil {
+		securityContext.SeccompProfile = csr.seccompProfile
+	}
+
 	return k8sv1.Container{
 		Name:                     csr.name,
 		Image:                    csr.launcherImg,
 		ImagePullPolicy:          csr.imgPullPolicy,
-		SecurityContext:          securityContext(csr.userID, csr.capabilities),
+		SecurityContext:          securityContext,
 		Command:                  cmd,
 		VolumeDevices:            csr.volumeDevices,
 		VolumeMounts:             csr.volumeMounts,
@@ -116,6 +126,24 @@ func WithDropALLCapabilities() Option {
 		} else {
 			renderer.capabilities.Drop = []k8sv1.Capability{"ALL"}
 		}
+	}
+}
+
+// WithPasstSandboxPermissions unconfines the container's AppArmor and
+// seccomp profiles. The passt core (used by the PasstBinding network
+// binding) sandboxes itself by creating an unprivileged user namespace
+// and then remounting / inside a fresh mount namespace before handing
+// traffic to the guest. The runtime default profiles deny that sandbox:
+// the default seccomp profile permits unshare(2) only under CAP_SYS_ADMIN
+// and the default AppArmor profile denies mount(2), so passt exits with
+// "Failed to remount /: Permission denied" and the VMI never reaches
+// Running (see kubevirt/kubevirt#12333). Raising pod privileges does not
+// help: passt drops root before sandboxing, so it no longer holds
+// CAP_SYS_ADMIN at the point it needs it.
+func WithPasstSandboxPermissions() Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.appArmorProfile = &k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}
+		renderer.seccompProfile = &k8sv1.SeccompProfile{Type: k8sv1.SeccompProfileTypeUnconfined}
 	}
 }
 
