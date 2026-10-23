@@ -1,0 +1,70 @@
+name: Build Hive KubeVirt Images
+
+# Serialise builds per image tag so concurrent dispatches cannot push to the
+# same registry tag simultaneously (COMP-4086).
+concurrency:
+  group: hive-images-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or SHA to build (e.g. chore/COMP-3399-kubevirt-1.9.1)"
+        required: true
+        default: "main"
+      tag:
+        description: "Image tag to build and push (e.g. v1.9.1)"
+        required: true
+        default: "v1.9.1"
+      push_targets:
+        description: "Space-separated image targets to build and push"
+        required: false
+        default: "virt-operator virt-api virt-controller virt-handler virt-launcher conformance pr-helper libguestfs-tools network-passt-binding"
+
+env:
+  # Same registry layout as the v1.8.4-memlock fleet build:
+  #   <DOCKER_REGISTRY>/hive-compute-infra/kubevirt/<component>:<tag>
+  IMAGE_PREFIX: ${{ vars.DOCKER_REGISTRY }}/hive-compute-infra/kubevirt
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    # Same environment pattern as kubevirt-gpu-device-plugin's Build Hive
+    # Image workflow: one GitHub environment holds the OVH registry
+    # credentials (vars DOCKER_REGISTRY / DOCKER_USERNAME, secret
+    # DOCKER_PASSWORD). Fleet images are promoted across dev/staging/
+    # production via GitOps tag bumps, so no per-environment variants exist.
+    environment: dev
+    name: Build and push KubeVirt images
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Install Crane
+        uses: imjasonh/setup-crane@v0.5
+
+      - name: Login to OVH registry
+        run: |
+          echo '${{ secrets.DOCKER_PASSWORD }}' | docker login \
+            "${{ vars.DOCKER_REGISTRY }}" -u "${{ vars.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Build and push images
+        run: |
+          DOCKER_PREFIX="${IMAGE_PREFIX}" \
+          DOCKER_TAG="${{ github.event.inputs.tag }}" \
+          PUSH_TARGETS='${{ github.event.inputs.push_targets }}' \
+          make bazel-push-images
+
+      - name: Verify pushed fleet tags
+        run: |
+          for img in virt-operator virt-api virt-controller virt-handler virt-launcher; do
+            echo "-- ${IMAGE_PREFIX}/${img}:${{ github.event.inputs.tag }}"
+            crane manifest "${IMAGE_PREFIX}/${img}:${{ github.event.inputs.tag }}" > /dev/null \
+              && echo "OK: ${img}"
+          done
+          echo "Fleet image set verified in ${IMAGE_PREFIX}"
