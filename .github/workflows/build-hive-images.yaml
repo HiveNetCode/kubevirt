@@ -22,6 +22,11 @@ on:
         required: false
         default: "virt-operator virt-api virt-controller virt-handler virt-launcher conformance pr-helper libguestfs-tools network-passt-binding"
 
+# The repo default grants GITHUB_TOKEN write access. This job only reads the
+# repo and pushes with the OVH credentials, so the token needs nothing more.
+permissions:
+  contents: read
+
 env:
   # Same registry layout as the v1.8.4-memlock fleet build:
   #   <DOCKER_REGISTRY>/hive-compute-infra/kubevirt/<component>:<tag>
@@ -39,6 +44,34 @@ jobs:
     name: Build and push KubeVirt images
     timeout-minutes: 360
     steps:
+      # Env vars alone are not enough: the Makefile pastes DOCKER_TAG and
+      # PUSH_TARGETS into a command string that a shell parses again, and make
+      # expands $(...) in them, so only plain characters may pass. The patterns
+      # sit in variables because bash cannot parse a bare space inside
+      # [[ =~ ]], and LC_ALL=C keeps the ranges ASCII-only in every locale.
+      - name: Validate inputs
+        run: |
+          export LC_ALL=C
+          ref_re='^[A-Za-z0-9._/-]+$'
+          tag_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          targets_re='^[A-Za-z0-9._/ -]+$'
+          if ! [[ "$INPUT_REF" =~ $ref_re ]]; then
+            echo "::error::ref does not match expected pattern (A-Za-z0-9._/- only)"
+            exit 1
+          fi
+          if ! [[ "$INPUT_TAG" =~ $tag_re ]]; then
+            echo "::error::tag does not match expected pattern (Docker tag format)"
+            exit 1
+          fi
+          if [ -n "$INPUT_PUSH_TARGETS" ] && ! [[ "$INPUT_PUSH_TARGETS" =~ $targets_re ]]; then
+            echo "::error::push_targets contains disallowed characters"
+            exit 1
+          fi
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
+
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -47,25 +80,6 @@ jobs:
 
       - name: Install Crane
         uses: imjasonh/setup-crane@v0.5
-
-      - name: Validate inputs
-        run: |
-          if ! [[ "$INPUT_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-            echo "::error::ref does not match expected pattern (A-Za-z0-9._/- only)"
-            exit 1
-          fi
-          if ! [[ "$INPUT_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "::error::tag does not match expected pattern (Docker tag format)"
-            exit 1
-          fi
-          if [ -n "$INPUT_PUSH_TARGETS" ] && ! [[ "$INPUT_PUSH_TARGETS" =~ ^[A-Za-z0-9._/ -]+$ ]]; then
-            echo "::error::push_targets contains disallowed characters"
-            exit 1
-          fi
-        env:
-          INPUT_REF: ${{ github.event.inputs.ref }}
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-          INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
 
       - name: Login to OVH registry
         run: |
