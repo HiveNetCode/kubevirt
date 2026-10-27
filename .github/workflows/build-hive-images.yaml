@@ -48,23 +48,51 @@ jobs:
       - name: Install Crane
         uses: imjasonh/setup-crane@v0.5
 
+      - name: Validate inputs
+        run: |
+          if ! [[ "$INPUT_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::ref does not match expected pattern (A-Za-z0-9._/- only)"
+            exit 1
+          fi
+          if ! [[ "$INPUT_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::tag does not match expected pattern (Docker tag format)"
+            exit 1
+          fi
+          if [ -n "$INPUT_PUSH_TARGETS" ] && ! [[ "$INPUT_PUSH_TARGETS" =~ ^[A-Za-z0-9._/ -]+$ ]]; then
+            echo "::error::push_targets contains disallowed characters"
+            exit 1
+          fi
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
+
       - name: Login to OVH registry
         run: |
-          echo '${{ secrets.DOCKER_PASSWORD }}' | docker login \
-            "${{ vars.DOCKER_REGISTRY }}" -u "${{ vars.DOCKER_USERNAME }}" --password-stdin
+          echo "$REGISTRY_PASSWORD" | docker login \
+            "$REGISTRY_URL" -u "$REGISTRY_USERNAME" --password-stdin
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          REGISTRY_URL: ${{ vars.DOCKER_REGISTRY }}
+          REGISTRY_USERNAME: ${{ vars.DOCKER_USERNAME }}
 
       - name: Build and push images
         run: |
           DOCKER_PREFIX="${IMAGE_PREFIX}" \
-          DOCKER_TAG="${{ github.event.inputs.tag }}" \
-          PUSH_TARGETS='${{ github.event.inputs.push_targets }}' \
+          DOCKER_TAG="$INPUT_TAG" \
+          PUSH_TARGETS="$INPUT_PUSH_TARGETS" \
           make bazel-push-images
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
 
       - name: Verify pushed fleet tags
         run: |
           for img in virt-operator virt-api virt-controller virt-handler virt-launcher; do
-            echo "-- ${IMAGE_PREFIX}/${img}:${{ github.event.inputs.tag }}"
-            crane manifest "${IMAGE_PREFIX}/${img}:${{ github.event.inputs.tag }}" > /dev/null \
+            echo "-- ${IMAGE_PREFIX}/${img}:${INPUT_TAG}"
+            crane manifest "${IMAGE_PREFIX}/${img}:${INPUT_TAG}" > /dev/null \
               && echo "OK: ${img}"
           done
           echo "Fleet image set verified in ${IMAGE_PREFIX}"
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
