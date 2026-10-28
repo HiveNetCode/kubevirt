@@ -280,6 +280,7 @@ func (m *backupTunnelManager) openConnectTunnel(ctx context.Context, targetURL s
 	// We use pipe to couple the gRPC server writes to the HTTP/2 request body
 	pr, pw := io.Pipe()
 
+	// #nosec No risk for SSRF. virt-controller picks the export Service, and TLS only accepts that Service name signed by the export CA.
 	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, targetURL, pr)
 	if err != nil {
 		pr.Close()

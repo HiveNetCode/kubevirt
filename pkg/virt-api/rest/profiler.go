@@ -179,6 +179,7 @@ func (app *SubresourceAPIApp) stopStartHandler(command string, request *restful.
 			go func(ip string, name string) {
 				defer wg.Done()
 				url := fmt.Sprintf("https://%s:%d/%s-profiler", ip, app.profilerComponentPort, command)
+				// #nosec No risk for SSRF. The URL targets a ready KubeVirt component pod in virt-api's namespace, on a fixed port and command.
 				req, _ := http.NewRequest("GET", url, nil)
 				resp, err := client.Do(req)
 				if err != nil {
@@ -280,6 +281,7 @@ func (app *SubresourceAPIApp) DumpClusterProfilerHandler(request *restful.Reques
 		go func(ip string, name string) {
 			defer wg.Done()
 			url := fmt.Sprintf("https://%s:%d/%s-profiler", ip, app.profilerComponentPort, command)
+			// #nosec No risk for SSRF. The selector only narrows ready KubeVirt component pods in virt-api's namespace. Port and command are fixed.
 			req, _ := http.NewRequest("GET", url, nil)
 			resp, err := client.Do(req)
 			if err != nil {

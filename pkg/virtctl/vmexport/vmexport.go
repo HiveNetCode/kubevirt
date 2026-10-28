@@ -797,6 +797,7 @@ func HandleHTTPGetRequest(client kubecli.KubevirtClient, vmexport *exportv1.Virt
 	httpClient := GetHTTPClientFn(transport, insecure)
 
 	// Generate and do the request
+	// #nosec No risk for SSRF. virtctl runs as the user and takes the URL from its flags or the VMExport status that virt-controller writes.
 	req, _ := http.NewRequest("GET", downloadUrl, nil)
 	for k, v := range headers {
 		req.Header.Set(k, v)

@@ -424,6 +424,7 @@ func ConstructUploadProxyPathAsync(uploadProxyURL, token string, insecure bool) 
 
 	// Attempt to discover async URL
 	client := GetHTTPClientFn(insecure)
+	// #nosec No risk for SSRF. virtctl runs as the user and probes the upload proxy URL from its flag or the cluster CDIConfig.
 	req, _ := http.NewRequest("HEAD", u.String(), nil)
 	req.Header.Add("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
@@ -440,6 +441,7 @@ func (c *command) newUploadRequest(token string, reader io.Reader, length int64)
 	if err != nil {
 		return nil, err
 	}
+	// #nosec No risk for SSRF. virtctl runs as the user and posts to the upload proxy URL from its flag or the cluster CDIConfig.
 	req, err := http.NewRequest("POST", uploadURL, io.NopCloser(reader))
 	if err != nil {
 		return nil, err

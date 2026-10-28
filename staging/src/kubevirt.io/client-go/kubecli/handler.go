@@ -282,6 +282,7 @@ func (v *virtHandlerConn) doRequest(req *http.Request) (response string, err err
 }
 
 func (v *virtHandlerConn) Put(url string, body io.ReadCloser) error {
+	// #nosec No risk for SSRF. virt-api only passes URLs that formatURI builds from the virt-handler pod IP and port and the VMI name.
 	req, err := http.NewRequest(http.MethodPut, url, body)
 	if err != nil {
 		return err
@@ -296,6 +297,7 @@ func (v *virtHandlerConn) Put(url string, body io.ReadCloser) error {
 }
 
 func (v *virtHandlerConn) Get(url, contentType string) (string, error) {
+	// #nosec No risk for SSRF. virt-api only passes URLs that formatURI builds from the virt-handler pod IP and port and the VMI name.
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
