@@ -177,6 +177,7 @@ func generateDeviceRulesForVMI(vmi *v1.VirtualMachineInstance, mountRoot *safepa
 		default:
 			continue
 		}
+		// #nosec No risk for path traversal. statDevice keeps the path under mountRoot with safepath.JoinNoFollow and only stats it.
 		rule, err := newAllowedDeviceRule(mountRoot, filepath.Join("/dev", volume.Name), getDeviceRwmPermissions())
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {

@@ -227,6 +227,7 @@ func resolveNoCloudSecrets(vmi *v1.VirtualMachineInstance, secretSourceDir strin
 		return keys, nil
 	}
 
+	// #nosec No risk for path traversal. A volume.Name with '/' or '..' fails VMI admission or pod creation, so virt-launcher never reads it.
 	baseDir := filepath.Join(secretSourceDir, volume.Name)
 	var userDataError, networkDataError error
 	var userData, networkData string
@@ -266,6 +267,7 @@ func resolveConfigDriveSecrets(vmi *v1.VirtualMachineInstance, secretSourceDir s
 		return keys, nil
 	}
 
+	// #nosec No risk for path traversal. A volume.Name with '/' or '..' fails VMI admission or pod creation, so virt-launcher never reads it.
 	baseDir := filepath.Join(secretSourceDir, volume.Name)
 	var userDataError, networkDataError error
 	var userData, networkData string
