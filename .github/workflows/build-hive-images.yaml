@@ -27,11 +27,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Same registry layout as the v1.8.4-memlock fleet build:
-  #   <DOCKER_REGISTRY>/hive-compute-infra/kubevirt/<component>:<tag>
-  IMAGE_PREFIX: ${{ vars.DOCKER_REGISTRY }}/hive-compute-infra/kubevirt
-
 jobs:
   build-push:
     runs-on: ubuntu-latest
@@ -73,17 +68,58 @@ jobs:
           INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.inputs.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Install Crane
-        uses: imjasonh/setup-crane@v0.5
+      # Not imjasonh/setup-crane: it logs crane in to ghcr.io with the job
+      # token, in the ~/.docker/config.json that hack/dockerized mounts into
+      # the build container.
+      - name: Install crane
+        run: |
+          archive="$RUNNER_TEMP/go-containerregistry.tar.gz"
+          curl --proto '=https' -fsSL --retry 5 --retry-all-errors -o "$archive" \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/crane"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/crane" crane
+          echo "$RUNNER_TEMP/crane" >> "$GITHUB_PATH"
+        env:
+          CRANE_VERSION: v0.22.1
+          CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 
+      # docker login sends the credentials to Docker Hub when the registry is
+      # empty or one of Docker Hub's names, and the registry also ends up in
+      # DOCKER_PREFIX, which the Makefile pastes into a command string that a
+      # shell parses again. The host needs a dot, or docker and crane read it
+      # as a Docker Hub namespace. printf, not echo: echo would take a
+      # password such as -n as an option and send nothing.
       - name: Login to OVH registry
         run: |
-          echo "$REGISTRY_PASSWORD" | docker login \
+          export LC_ALL=C
+          registry_re='^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)+(:[0-9]+)?$'
+          missing=()
+          [ -n "$REGISTRY_URL" ] || missing+=("var DOCKER_REGISTRY")
+          [ -n "$REGISTRY_USERNAME" ] || missing+=("var DOCKER_USERNAME")
+          [ -n "$REGISTRY_PASSWORD" ] || missing+=("secret DOCKER_PASSWORD")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::dev environment is missing: ${missing[*]}"
+            exit 1
+          fi
+          if ! [[ "$REGISTRY_URL" =~ $registry_re ]]; then
+            echo "::error::DOCKER_REGISTRY must be a plain host or host:port"
+            exit 1
+          fi
+          registry_host=${REGISTRY_URL%%:*}
+          case "${registry_host,,}" in
+            docker.io | *.docker.io | docker.com | *.docker.com)
+              echo "::error::DOCKER_REGISTRY must not be Docker Hub"
+              exit 1
+              ;;
+          esac
+          printf '%s\n' "$REGISTRY_PASSWORD" | docker login \
             "$REGISTRY_URL" -u "$REGISTRY_USERNAME" --password-stdin
         env:
           REGISTRY_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
@@ -92,21 +128,38 @@ jobs:
 
       - name: Build and push images
         run: |
-          DOCKER_PREFIX="${IMAGE_PREFIX}" \
+          DOCKER_PREFIX="${HIVE_IMAGE_REPO}" \
           DOCKER_TAG="$INPUT_TAG" \
           PUSH_TARGETS="$INPUT_PUSH_TARGETS" \
           make bazel-push-images
         env:
+          # The runner image ships podman too, and hack/common.sh prefers it
+          # when this is unset, but only docker holds the registry login.
+          KUBEVIRT_CRI: docker
+          # Same registry layout as the v1.8.4-memlock fleet build:
+          #   <DOCKER_REGISTRY>/hive-compute-infra/kubevirt/<component>:<tag>
+          # KubeVirt's Makefile takes its own image-name prefix from the
+          # environment, so the path reaches make only as DOCKER_PREFIX.
+          HIVE_IMAGE_REPO: ${{ vars.DOCKER_REGISTRY }}/hive-compute-infra/kubevirt
           INPUT_TAG: ${{ github.event.inputs.tag }}
           INPUT_PUSH_TARGETS: ${{ github.event.inputs.push_targets }}
 
       - name: Verify pushed fleet tags
         run: |
+          missing=0
           for img in virt-operator virt-api virt-controller virt-handler virt-launcher; do
-            echo "-- ${IMAGE_PREFIX}/${img}:${INPUT_TAG}"
-            crane manifest "${IMAGE_PREFIX}/${img}:${INPUT_TAG}" > /dev/null \
-              && echo "OK: ${img}"
+            echo "-- ${HIVE_IMAGE_REPO}/${img}:${INPUT_TAG}"
+            if crane manifest "${HIVE_IMAGE_REPO}/${img}:${INPUT_TAG}" > /dev/null; then
+              echo "OK: ${img}"
+            else
+              echo "::error::missing or unreadable: ${HIVE_IMAGE_REPO}/${img}:${INPUT_TAG}"
+              missing=$((missing + 1))
+            fi
           done
-          echo "Fleet image set verified in ${IMAGE_PREFIX}"
+          if [ "$missing" -gt 0 ]; then
+            exit 1
+          fi
+          echo "Fleet image set verified in ${HIVE_IMAGE_REPO}"
         env:
+          HIVE_IMAGE_REPO: ${{ vars.DOCKER_REGISTRY }}/hive-compute-infra/kubevirt
           INPUT_TAG: ${{ github.event.inputs.tag }}
