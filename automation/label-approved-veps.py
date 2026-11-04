@@ -90,11 +90,21 @@ def add_label_to_pr():
     response.raise_for_status()
 
 def remove_label_from_pr():
-    """Remove the 'approved-vep' label from the kubevirt PR."""
+    """Remove the 'approved-vep' label from the kubevirt PR.
+
+    Best effort: label removal is cleanup, so a missing label (404)
+    or a denied removal (403, e.g. a read-only GITHUB_TOKEN) is
+    logged but does not fail the check.
+    """
     url = f"https://api.github.com/repos/{KUBEVIRT_REPO}/issues/{PR_NUMBER}/labels/approved-vep"
     response = requests.delete(url, headers=HEADERS)
-    if response.status_code not in (204, 404):
+    if response.status_code not in (204, 403, 404):
         response.raise_for_status()
+    elif response.status_code == 403:
+        print(
+            "Warning: 'approved-vep' label removal was denied "
+            f"(HTTP 403); continuing: {response.text.strip()}"
+        )
 
 def parse_project_url(project_url):
     """

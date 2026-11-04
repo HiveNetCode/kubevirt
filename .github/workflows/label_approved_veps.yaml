@@ -4,9 +4,13 @@ on:
     types: [opened, edited, reopened, synchronize]
   workflow_dispatch:
 
+# The workflow schema takes one level per resource (write implies read);
+# a list here fails validation. issues:write covers the label add/remove,
+# pull-requests:read the PR lookup.
 permissions:
   contents: read
   issues: write
+  pull-requests: read
 
 jobs:
   check-vep:
@@ -25,7 +29,9 @@ jobs:
 
       - name: Run VEP check script
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          # Built-in token (always fresh) instead of a secret: a stored PAT
+          # goes stale as soon as it is rotated, which 401s the PR lookup.
+          GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           TARGET_PROJECT_URL: "https://github.com/orgs/kubevirt/projects/21"
         run: python automation/label-approved-veps.py
