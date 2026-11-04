@@ -34,10 +34,23 @@ import (
 )
 
 var _ = Describe("VIOMMU Domain Configurator", func() {
-	It("should not add a vIOMMU to domains without GB202GL host devices", func() {
+	It("should not add a vIOMMU to domains without host devices", func() {
 		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 448}
+
+		var domain api.Domain
+		configurator := compute.NewVIOMMUDomainConfigurator()
+		Expect(configurator.Configure(vmi, &domain)).To(Succeed())
+
+		Expect(domain.Spec.Devices.IOMMU).To(BeEmpty())
+		Expect(domain.Spec.Features).To(BeNil())
+	})
+
+	It("should not add a vIOMMU to host-device domains at or below the libvirt EIM threshold", func() {
+		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 240}
 		vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{{
-			DeviceName: "GB202_GEFORCE_RTX_5090",
+			DeviceName: "GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION",
 		}}
 
 		var domain api.Domain
@@ -48,8 +61,9 @@ var _ = Describe("VIOMMU Domain Configurator", func() {
 		Expect(domain.Spec.Features).To(BeNil())
 	})
 
-	It("should add the vIOMMU with caching-mode and the userspace IOAPIC for GB202GL host devices", func() {
+	It("should add the vIOMMU with caching-mode and the userspace IOAPIC to host-device domains above the threshold", func() {
 		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 448}
 		vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{{
 			DeviceName: "GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION",
 		}}
@@ -70,8 +84,37 @@ var _ = Describe("VIOMMU Domain Configurator", func() {
 		Expect(domain.Spec.Features.Ioapic).To(Equal(&api.FeatureIoapic{Driver: "qemu"}))
 	})
 
+	It("should add the vIOMMU at exactly one vCPU above the threshold", func() {
+		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 256}
+		vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{{
+			DeviceName: "GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION",
+		}}
+
+		var domain api.Domain
+		configurator := compute.NewVIOMMUDomainConfigurator()
+		Expect(configurator.Configure(vmi, &domain)).To(Succeed())
+
+		Expect(domain.Spec.Devices.IOMMU).To(HaveLen(1))
+	})
+
+	It("should add the vIOMMU to non-GB202GL host-device domains above the threshold", func() {
+		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 448}
+		vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{{
+			DeviceName: "GB202_GEFORCE_RTX_5090",
+		}}
+
+		var domain api.Domain
+		configurator := compute.NewVIOMMUDomainConfigurator()
+		Expect(configurator.Configure(vmi, &domain)).To(Succeed())
+
+		Expect(domain.Spec.Devices.IOMMU).To(HaveLen(1))
+	})
+
 	It("should serialize the vIOMMU as libvirt expects", func() {
 		vmi := libvmi.New()
+		vmi.Spec.Domain.CPU = &v1.CPU{Cores: 448}
 		vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{{
 			DeviceName: "GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION",
 		}}
