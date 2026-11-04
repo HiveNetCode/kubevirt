@@ -291,5 +291,26 @@ func requiredCapabilities(vmi *v1.VirtualMachineInstance) []k8sv1.Capability {
 		capabilities = append(capabilities, CAP_SYS_NICE)
 	}
 
+	// passt sandboxes itself by remounting / read-only; without CAP_SYS_ADMIN
+	// the backend exits with "Failed to remount /: Permission denied" and the
+	// domain never starts.
+	if vmiUsesPasstBinding(vmi) {
+		capabilities = append(capabilities, CAP_SYS_ADMIN)
+	}
+
 	return capabilities
+}
+
+func vmiUsesPasstBinding(vmi *v1.VirtualMachineInstance) bool {
+	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
+		if iface.PasstBinding != nil {
+			return true
+		}
+		// The passt binding plugin uses the same libvirt passt backend and
+		// therefore the same sandbox.
+		if iface.Binding != nil && iface.Binding.Name == "passt" {
+			return true
+		}
+	}
+	return false
 }

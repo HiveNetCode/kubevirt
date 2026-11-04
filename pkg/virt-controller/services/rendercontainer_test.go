@@ -96,6 +96,24 @@ var _ = Describe("Container spec renderer", func() {
 					ConsistOf(k8sv1.Capability(CAP_NET_BIND_SERVICE)))
 			})
 		})
+
+		Context("a VMI using passt binding", func() {
+			BeforeEach(func() {
+				vmi := simplestVMI()
+				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
+					Name: "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						PasstBinding: &v1.InterfacePasstBinding{},
+					},
+				}}
+				specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy, WithCapabilities(vmi))
+			})
+
+			It("must request the SYS_ADMIN capability for the passt sandbox", func() {
+				Expect(specRenderer.Render(exampleCommand).SecurityContext.Capabilities.Add).To(
+					ContainElement(k8sv1.Capability(CAP_SYS_ADMIN)))
+			})
+		})
 	})
 
 	Context("with volume devices option", func() {
