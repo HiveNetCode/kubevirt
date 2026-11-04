@@ -40,6 +40,7 @@ import (
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 type VMIsMutator struct {
@@ -83,7 +84,7 @@ func ApplyNewVMIMutations(newVMI *v1.VirtualMachineInstance, clusterConfig *virt
 		}
 	}
 
-	if !clusterConfig.RootEnabled() {
+	if !clusterConfig.RootEnabled() && !vmitrait.UsesPasstBinding(newVMI) {
 		markAsNonroot(newVMI)
 	}
 

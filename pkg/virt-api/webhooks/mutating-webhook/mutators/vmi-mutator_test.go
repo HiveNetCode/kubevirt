@@ -1164,6 +1164,22 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 		Expect(status.RuntimeUser).NotTo(BeZero())
 	})
 
+	When("the VMI uses passt binding and the Root feature gate is disabled", func() {
+		BeforeEach(func() {
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					PasstBinding: &v1.InterfacePasstBinding{},
+				},
+			}}
+		})
+
+		It("should not tag the vmi as non-root so the passt backend can self-sandbox", func() {
+			_, _, status := getMetaSpecStatusFromAdmit()
+			Expect(status.RuntimeUser).To(BeZero())
+		})
+	})
+
 	DescribeTable("evictionStrategy should match the", func(f func(*v1.VirtualMachineInstanceSpec) v1.EvictionStrategy) {
 		expected := f(&vmi.Spec)
 		_, vmiSpec, _ := getMetaSpecStatusFromAdmit()
