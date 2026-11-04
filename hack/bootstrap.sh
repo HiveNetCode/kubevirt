@@ -42,6 +42,12 @@ function kubevirt::bootstrap::regenerate() {
         # Run gazelle to ensure that nogo has all build files resolved and that we can bootstrap the env.
         # This is necessary since some steps remove the vendor build files and nogo would be broken then.
         KUBEVIRT_BOOTSTRAPPING=true bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} //:gazelle -- --exclude kubevirtci/cluster-up
+        # gazelle cannot express `#cgo pkg-config` directives, so the BUILD files it generates
+        # for the cgo vendor packages lack the cdeps wiring to their C libraries. Add it here
+        # (mirrors hack/bazel-generate.sh); without it the go link fails with undefined
+        # references to libvirt/libnbd symbols.
+        bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libvirt-libs' //vendor/libvirt.org/go/libvirt:go_default_library
+        bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libnbd-libs' //vendor/libguestfs.org/libnbd/:go_default_library
         KUBEVIRT_BOOTSTRAPPING=true bazel run --config ${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} //rpm:sandbox_${1}_cs${KUBEVIRT_CENTOS_STREAM_VERSION}
         bazel clean
 
