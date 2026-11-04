@@ -1,0 +1,67 @@
+name: Mirror Upstream Images Into The Hive Registry
+
+# Maintenance helper: copies public upstream images that the fork does not
+# build (e.g. the kubevirt virt-template components) into the OVH registry
+# under the fleet tag, using the same dev-environment registry credentials as
+# the build workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      source_prefix:
+        description: "Source registry + repository prefix (no trailing slash)"
+        required: true
+        default: "quay.io/kubevirt"
+      dest_prefix:
+        description: "Destination repository prefix under our registry"
+        required: true
+        default: "hive-compute-infra/kubevirt"
+      images:
+        description: "Space-separated image names to mirror"
+        required: true
+        default: "virt-template-apiserver virt-template-controller"
+      tag:
+        description: "Tag to copy (same on both sides)"
+        required: true
+        default: "v0.2.3"
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Login to OVH registry
+        run: |
+          export LC_ALL=C
+          missing=()
+          [ -n "$REGISTRY_URL" ] || missing+=("var DOCKER_REGISTRY")
+          [ -n "$REGISTRY_USERNAME" ] || missing+=("var DOCKER_USERNAME")
+          [ -n "$REGISTRY_PASSWORD" ] || missing+=("secret DOCKER_PASSWORD")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::dev environment is missing: ${missing[*]}"
+            exit 1
+          fi
+          printf '%s\n' "$REGISTRY_PASSWORD" | docker login \
+            "$REGISTRY_URL" -u "$REGISTRY_USERNAME" --password-stdin
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          REGISTRY_URL: ${{ vars.DOCKER_REGISTRY }}
+          REGISTRY_USERNAME: ${{ vars.DOCKER_USERNAME }}
+
+      - name: Mirror images
+        run: |
+          set -euo pipefail
+          src_prefix="${{ github.event.inputs.source_prefix }}"
+          dst_prefix="${{ vars.DOCKER_REGISTRY }}/${{ github.event.inputs.dest_prefix }}"
+          tag="${{ github.event.inputs.tag }}"
+          for img in ${{ github.event.inputs.images }}; do
+            src="${src_prefix}/${img}:${tag}"
+            dst="${dst_prefix}/${img}:${tag}"
+            echo "::group::mirror ${src} -> ${dst}"
+            docker pull "$src"
+            docker tag "$src" "$dst"
+            docker push "$dst"
+            echo "::endgroup::"
+          done
