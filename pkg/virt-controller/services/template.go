@@ -103,6 +103,7 @@ const qemuTimeoutJitterRange = 120
 const (
 	CAP_NET_BIND_SERVICE = "NET_BIND_SERVICE"
 	CAP_SYS_NICE         = "SYS_NICE"
+	CAP_SYS_ADMIN        = "SYS_ADMIN"
 )
 
 // LibvirtStartupDelay is added to custom liveness and readiness probes initial delay value.
