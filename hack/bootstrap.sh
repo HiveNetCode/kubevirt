@@ -46,8 +46,8 @@ function kubevirt::bootstrap::regenerate() {
         # for the cgo vendor packages lack the cdeps wiring to their C libraries. Add it here
         # (mirrors hack/bazel-generate.sh); without it the go link fails with undefined
         # references to libvirt/libnbd symbols.
-        bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libvirt-libs' //vendor/libvirt.org/go/libvirt:go_default_library
-        bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libnbd-libs' //vendor/libguestfs.org/libnbd/:go_default_library
+        KUBEVIRT_BOOTSTRAPPING=true bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libvirt-libs' //vendor/libvirt.org/go/libvirt:go_default_library
+        KUBEVIRT_BOOTSTRAPPING=true bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} -- :buildozer 'add cdeps //:libnbd-libs' //vendor/libguestfs.org/libnbd/:go_default_library
         KUBEVIRT_BOOTSTRAPPING=true bazel run --config ${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} //rpm:sandbox_${1}_cs${KUBEVIRT_CENTOS_STREAM_VERSION}
         bazel clean
 
