@@ -109,9 +109,20 @@ var _ = Describe("Container spec renderer", func() {
 				specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy, WithCapabilities(vmi))
 			})
 
-			It("must request the SYS_ADMIN capability for the passt sandbox", func() {
+			It("must request the passt sandbox capabilities", func() {
+				// The passt backend sandboxes itself (remount / read-only, drop
+				// capabilities and supplementary groups, drop to "nobody"). The
+				// launcher runs as non-root, so these caps only reach passt
+				// through the file capabilities on /usr/bin/passt (see
+				// rpm/BUILD.bazel) ∩ the bounding set requested here.
 				Expect(specRenderer.Render(exampleCommand).SecurityContext.Capabilities.Add).To(
-					ContainElement(k8sv1.Capability(CAP_SYS_ADMIN)))
+					ConsistOf(
+						k8sv1.Capability(CAP_NET_BIND_SERVICE),
+						k8sv1.Capability(CAP_SYS_NICE),
+						k8sv1.Capability(CAP_SYS_ADMIN),
+						k8sv1.Capability(CAP_SETUID),
+						k8sv1.Capability(CAP_SETGID),
+					))
 			})
 		})
 	})

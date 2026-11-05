@@ -78,4 +78,27 @@ var _ = Describe("VMI traits", func() {
 			Expect(vmitrait.HasVFIO(libvmi.New())).To(BeFalse())
 		})
 	})
+
+	Context("UsesPasstBinding", func() {
+		DescribeTable("should return true when a passt backend is requested", func(vmi *v1.VirtualMachineInstance) {
+			Expect(vmitrait.UsesPasstBinding(vmi)).To(BeTrue())
+		},
+			Entry("with the passtBinding field",
+				libvmi.New(libvmi.WithInterface(
+					libvmi.InterfaceDeviceWithPasstBinding("default"),
+				)),
+			),
+			Entry("with the passt binding plugin",
+				libvmi.New(libvmi.WithInterface(
+					libvmi.InterfaceWithPasstBindingPlugin(),
+				)),
+			),
+		)
+
+		It("should return false when no passt backend is requested", func() {
+			vmi := libvmi.New(libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()))
+			Expect(vmitrait.UsesPasstBinding(vmi)).To(BeFalse())
+			Expect(vmitrait.UsesPasstBinding(libvmi.New())).To(BeFalse())
+		})
+	})
 })

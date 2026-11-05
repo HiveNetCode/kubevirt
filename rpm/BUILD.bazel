@@ -1604,6 +1604,18 @@ rpmtree(
 
 rpmtree(
     name = "launcherbase_aarch64_cs10",
+    capabilities = {
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
+    },
     rpms = [
         "@acl-0__2.4.0-2.el10.aarch64//rpm",
         "@alternatives-0__1.30-2.el10.aarch64//rpm",
@@ -1797,6 +1809,16 @@ rpmtree(
     capabilities = {
         "/usr/libexec/qemu-kvm": [
             "cap_net_bind_service",
+        ],
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
         ],
     },
     rpms = [
@@ -2001,6 +2023,18 @@ rpmtree(
 
 rpmtree(
     name = "launcherbase_s390x_cs10",
+    capabilities = {
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
+    },
     rpms = [
         "@acl-0__2.4.0-2.el10.s390x//rpm",
         "@alternatives-0__1.30-2.el10.s390x//rpm",
@@ -2189,6 +2223,16 @@ rpmtree(
     capabilities = {
         "/usr/libexec/qemu-kvm": [
             "cap_net_bind_service",
+        ],
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
         ],
     },
     rpms = [
@@ -2387,6 +2431,18 @@ rpmtree(
 
 rpmtree(
     name = "launcherbase_x86_64_cs10",
+    capabilities = {
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
+    },
     rpms = [
         "@acl-0__2.4.0-2.el10.x86_64//rpm",
         "@alternatives-0__1.30-2.el10.x86_64//rpm",
@@ -2584,6 +2640,16 @@ rpmtree(
     capabilities = {
         "/usr/libexec/qemu-kvm": [
             "cap_net_bind_service",
+        ],
+        # passt sandboxes itself (remount / read-only, drop capabilities and
+        # supplementary groups, drop to "nobody"). The file capabilities
+        # grant the self-sandbox to the passt process itself even though the
+        # virt-launcher runs as non-root (Kubernetes only puts requested
+        # capabilities of non-root containers into the bounding set).
+        "/usr/bin/passt": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
         ],
     },
     rpms = [
