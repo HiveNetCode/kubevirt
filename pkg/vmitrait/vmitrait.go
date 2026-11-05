@@ -29,6 +29,29 @@ func IsNonRoot(vmi *v1.VirtualMachineInstance) bool {
 	return ok || nonRoot
 }
 
+// UsesPasstBinding reports whether the VMI requests the passt backend for any
+// of its interfaces, either via the core passtBinding field or the passt
+// binding plugin. The passt backend sandboxes itself (remount / read-only,
+// drop capabilities and supplementary groups, drop to "nobody"), which
+// needs CAP_SYS_ADMIN, CAP_SETUID and CAP_SETGID in the process's effective
+// set. The launcher runs as non-root, where Kubernetes only places requested
+// capabilities into the bounding set, so the image grants the capabilities
+// to the passt binary via file capabilities (see the launcherbase targets in
+// rpm/BUILD.bazel); the bounding set must contain them for the grant to
+// take effect.
+func UsesPasstBinding(vmi *v1.VirtualMachineInstance) bool {
+	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
+		if iface.PasstBinding != nil {
+			return true
+		}
+		// The passt binding plugin drives the same libvirt passt backend.
+		if iface.Binding != nil && iface.Binding.Name == "passt" {
+			return true
+		}
+	}
+	return false
+}
+
 // HasVFIO reports whether the VMI requests any VFIO device.
 func HasVFIO(vmi *v1.VirtualMachineInstance) bool {
 	return hasHostDev(vmi) || hasGPU(vmi) || hasSRIOV(vmi)

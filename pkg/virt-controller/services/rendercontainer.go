@@ -291,26 +291,17 @@ func requiredCapabilities(vmi *v1.VirtualMachineInstance) []k8sv1.Capability {
 		capabilities = append(capabilities, CAP_SYS_NICE)
 	}
 
-	// passt sandboxes itself by remounting / read-only; without CAP_SYS_ADMIN
-	// the backend exits with "Failed to remount /: Permission denied" and the
-	// domain never starts.
-	if vmiUsesPasstBinding(vmi) {
-		capabilities = append(capabilities, CAP_SYS_ADMIN)
+	// passt sandboxes itself: remount / read-only (CAP_SYS_ADMIN), drop
+	// capabilities and supplementary groups, and drop to "nobody"
+	// (CAP_SETUID, CAP_SETGID). The launcher runs as non-root, where
+	// Kubernetes only adds requested capabilities to the bounding set, so
+	// these caps reach the passt process through the file capabilities set
+	// on /usr/bin/passt in the launcher image (effective = file caps ∩
+	// bounding). Without them passt exits with "Failed to remount /:
+	// Permission denied" and the domain never starts.
+	if vmitrait.UsesPasstBinding(vmi) {
+		capabilities = append(capabilities, CAP_SYS_ADMIN, CAP_SETUID, CAP_SETGID)
 	}
 
 	return capabilities
-}
-
-func vmiUsesPasstBinding(vmi *v1.VirtualMachineInstance) bool {
-	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
-		if iface.PasstBinding != nil {
-			return true
-		}
-		// The passt binding plugin uses the same libvirt passt backend and
-		// therefore the same sandbox.
-		if iface.Binding != nil && iface.Binding.Name == "passt" {
-			return true
-		}
-	}
-	return false
 }
