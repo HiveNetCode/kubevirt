@@ -35,6 +35,7 @@ type ContainerSpecRenderer struct {
 	ports                    []k8sv1.ContainerPort
 	capabilities             *k8sv1.Capabilities
 	allowPrivilegeEscalation *bool
+	appArmorProfile          *k8sv1.AppArmorProfile
 	args                     []string
 	extraEnvVars             []k8sv1.EnvVar
 }
@@ -54,7 +55,7 @@ func NewContainerSpecRenderer(containerName string, launcherImg string, imgPullP
 }
 
 func (csr *ContainerSpecRenderer) Render(cmd []string) k8sv1.Container {
-	return k8sv1.Container{
+	container := k8sv1.Container{
 		Name:                     csr.name,
 		Image:                    csr.launcherImg,
 		ImagePullPolicy:          csr.imgPullPolicy,
@@ -70,6 +71,12 @@ func (csr *ContainerSpecRenderer) Render(cmd []string) k8sv1.Container {
 		Args:                     csr.args,
 		TerminationMessagePolicy: k8sv1.TerminationMessageFallbackToLogsOnError,
 	}
+
+	if csr.appArmorProfile != nil {
+		container.SecurityContext.AppArmorProfile = csr.appArmorProfile
+	}
+
+	return container
 }
 
 func (csr *ContainerSpecRenderer) envVars() []k8sv1.EnvVar {
@@ -116,6 +123,17 @@ func WithCapabilities(vmi *v1.VirtualMachineInstance) Option {
 func WithAllowPrivilegeEscalation(allow bool) Option {
 	return func(renderer *ContainerSpecRenderer) {
 		renderer.allowPrivilegeEscalation = pointer.P(allow)
+	}
+}
+
+// WithAppArmorProfile overrides the AppArmor profile of the rendered
+// container. The compute container of passt VMIs runs unconfined because
+// the node's CRI profile (cri-containerd.apparmor.d) denies the mount(2)
+// call the passt backend's self-sandbox uses to remount / as unbindable
+// (see template.go).
+func WithAppArmorProfile(profile k8sv1.AppArmorProfile) Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.appArmorProfile = &profile
 	}
 }
 

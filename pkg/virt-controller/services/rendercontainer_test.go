@@ -147,6 +147,25 @@ var _ = Describe("Container spec renderer", func() {
 		})
 	})
 
+	Context("with apparmor profile option", func() {
+		It("should default to no AppArmorProfile for a non-root container", func() {
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy, WithNonRoot(nonRootUser))
+			Expect(specRenderer.Render(exampleCommand).SecurityContext.AppArmorProfile).To(BeNil())
+		})
+
+		It("should honor an explicit AppArmorProfile override for a non-root container", func() {
+			// The passt backend's self-sandbox remounts / as unbindable,
+			// which the node's CRI AppArmor profile (cri-containerd.
+			// apparmor.d) denies with a mount(2) EPERM, so passt VMIs
+			// run the compute container unconfined.
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy,
+				WithNonRoot(nonRootUser),
+				WithAppArmorProfile(k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}))
+			Expect(specRenderer.Render(exampleCommand).SecurityContext.AppArmorProfile).To(
+				Equal(&k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}))
+		})
+	})
+
 	Context("with volume devices option", func() {
 		const (
 			volumeName = "asd"

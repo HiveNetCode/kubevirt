@@ -963,6 +963,14 @@ func (t *TemplateService) newContainerSpecRenderer(vmi *v1.VirtualMachineInstanc
 	// container can gain.
 	if vmitrait.UsesPasstBinding(vmi) {
 		computeContainerOpts = append(computeContainerOpts, WithAllowPrivilegeEscalation(true))
+		// The passt backend's self-sandbox remounts / as unbindable, which
+		// the node's CRI AppArmor profile (cri-containerd.apparmor.d)
+		// denies with a mount(2) EPERM, so run the compute container of
+		// passt VMIs unconfined. This also unconfines qemu and libvirt in
+		// the same container; a custom node profile allowing only the
+		// sandbox's mount(2) (and userns) is the hardening path.
+		computeContainerOpts = append(computeContainerOpts,
+			WithAppArmorProfile(k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}))
 	}
 	if vmi.Spec.ReadinessProbe != nil {
 		computeContainerOpts = append(computeContainerOpts, WithReadinessProbe(vmi))
