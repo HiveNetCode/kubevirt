@@ -953,6 +953,17 @@ func (t *TemplateService) newContainerSpecRenderer(vmi *v1.VirtualMachineInstanc
 		computeContainerOpts = append(computeContainerOpts, WithNonRoot(userId))
 		computeContainerOpts = append(computeContainerOpts, WithDropALLCapabilities())
 	}
+	// The passt backend sandboxes itself through the file capabilities set
+	// on /usr/bin/passt in the launcher image (see rpm/BUILD.bazel). The
+	// kernel only grants those while the process is not in no-new-privs
+	// mode, which the container runtime enables via
+	// allowPrivilegeEscalation=false for non-root containers, so lift the
+	// default for passt VMIs. The bounding set (drop ALL plus the
+	// requested capabilities) still limits what any process in the
+	// container can gain.
+	if vmitrait.UsesPasstBinding(vmi) {
+		computeContainerOpts = append(computeContainerOpts, WithAllowPrivilegeEscalation(true))
+	}
 	if vmi.Spec.ReadinessProbe != nil {
 		computeContainerOpts = append(computeContainerOpts, WithReadinessProbe(vmi))
 	}
