@@ -1610,6 +1610,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",
@@ -1815,6 +1828,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",
@@ -2029,6 +2055,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",
@@ -2229,6 +2268,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",
@@ -2437,6 +2489,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",
@@ -2646,6 +2711,19 @@ rpmtree(
         # grant the self-sandbox to the passt process itself even though the
         # virt-launcher runs as non-root (Kubernetes only puts requested
         # capabilities of non-root containers into the bounding set).
+        # passt re-execs itself as the AVX2-optimized variant shipped in the
+        # same RPM (/usr/bin/passt.avx2, arch_avx2_exec) at startup, before
+        # its self-sandboxing. File capabilities do not survive that exec
+        # unless the variant carries them as well, in which case the sandbox
+        # fails with "Failed to detach isolating namespaces: Operation not
+        # permitted" (unshare(2) without CAP_SYS_ADMIN). Architectures
+        # without an AVX2 build simply lack the file and the entry is
+        # ignored by the rpmtree tool.
+        "/usr/bin/passt.avx2": [
+            "cap_sys_admin",
+            "cap_setuid",
+            "cap_setgid",
+        ],
         "/usr/bin/passt": [
             "cap_sys_admin",
             "cap_setuid",

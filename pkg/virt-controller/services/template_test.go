@@ -4680,6 +4680,47 @@ var _ = Describe("Template", func() {
 			}, true),
 		)
 
+		DescribeTable("should set the correct appArmorProfile on the compute container", func(
+			getVMI func() *v1.VirtualMachineInstance,
+			appArmorProfile *k8sv1.AppArmorProfile) {
+			config, kvStore, svc = configFactory(defaultArch)
+			vmi := getVMI()
+
+			pod, err := svc.RenderLaunchManifest(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			var compute *k8sv1.Container
+			for i := range pod.Spec.Containers {
+				if pod.Spec.Containers[i].Name == "compute" {
+					compute = &pod.Spec.Containers[i]
+					break
+				}
+			}
+			Expect(compute).ToNot(BeNil())
+			Expect(compute.SecurityContext.AppArmorProfile).To(Equal(appArmorProfile))
+		},
+			Entry("on a non-root virt-launcher without passt binding", func() *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI("fake-vmi")
+				vmi.Status.RuntimeUser = uint64(nonRootUser)
+				return vmi
+			}, nil),
+			// The passt backend's self-sandbox remounts / as unbindable,
+			// which the node's CRI AppArmor profile (cri-containerd.
+			// apparmor.d) denies with a mount(2) EPERM, so passt VMIs run
+			// the compute container unconfined.
+			Entry("on a non-root virt-launcher with passt binding", func() *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI("fake-vmi")
+				vmi.Status.RuntimeUser = uint64(nonRootUser)
+				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
+					Name: "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						PasstBinding: &v1.InterfacePasstBinding{},
+					},
+				}}
+				return vmi
+			}, &k8sv1.AppArmorProfile{Type: k8sv1.AppArmorProfileTypeUnconfined}),
+		)
+
 		DescribeTable("should compute the correct security context", func(
 			getVMI func() *v1.VirtualMachineInstance,
 			securityContext *k8sv1.PodSecurityContext) {
