@@ -226,10 +226,10 @@ http_file(
 
 http_archive(
     name = "bazeldnf",
-    sha256 = "030b3ef5c8ad6f845945ff3e35a5c7377c0666a30cedf80a3a9731d42c7326b7",
-    strip_prefix = "bazeldnf-0.5.9-2-hc3",
+    sha256 = "0e3cdd6dacfb0f6bc0c6697c82dc77aeb559da0cce68f9c5085b9c22bafc591e",
+    strip_prefix = "bazeldnf-0.5.9-3-hc4",
     urls = [
-        "https://github.com/HiveNetCode/bazeldnf/archive/refs/tags/v0.5.9-2-hc3.tar.gz",
+        "https://github.com/HiveNetCode/bazeldnf/archive/refs/tags/v0.5.9-3-hc4.tar.gz",
     ],
 )
 
