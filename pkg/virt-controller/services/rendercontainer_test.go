@@ -12,6 +12,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/util"
 )
 
@@ -124,6 +125,25 @@ var _ = Describe("Container spec renderer", func() {
 						k8sv1.Capability(CAP_SETGID),
 					))
 			})
+		})
+	})
+
+	Context("with allow privilege escalation option", func() {
+		It("should default to AllowPrivilegeEscalation=false for a non-root container", func() {
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy, WithNonRoot(nonRootUser))
+			Expect(specRenderer.Render(exampleCommand).SecurityContext.AllowPrivilegeEscalation).To(
+				Equal(pointer.P(false)))
+		})
+
+		It("should honor an explicit AllowPrivilegeEscalation=true override for a non-root container", func() {
+			// The passt backend needs file capabilities granted at exec
+			// time, which the kernel suppresses while no-new-privs (the
+			// runtime effect of allowPrivilegeEscalation=false) is active.
+			specRenderer = NewContainerSpecRenderer(containerName, img, pullPolicy,
+				WithNonRoot(nonRootUser),
+				WithAllowPrivilegeEscalation(true))
+			Expect(specRenderer.Render(exampleCommand).SecurityContext.AllowPrivilegeEscalation).To(
+				Equal(pointer.P(true)))
 		})
 	})
 

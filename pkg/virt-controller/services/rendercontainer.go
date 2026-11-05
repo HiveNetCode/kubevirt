@@ -22,20 +22,21 @@ const (
 )
 
 type ContainerSpecRenderer struct {
-	imgPullPolicy     k8sv1.PullPolicy
-	launcherImg       string
-	name              string
-	userID            int64
-	volumeDevices     []k8sv1.VolumeDevice
-	volumeMounts      []k8sv1.VolumeMount
-	sharedFilesystems []string
-	resources         k8sv1.ResourceRequirements
-	liveninessProbe   *k8sv1.Probe
-	readinessProbe    *k8sv1.Probe
-	ports             []k8sv1.ContainerPort
-	capabilities      *k8sv1.Capabilities
-	args              []string
-	extraEnvVars      []k8sv1.EnvVar
+	imgPullPolicy            k8sv1.PullPolicy
+	launcherImg              string
+	name                     string
+	userID                   int64
+	volumeDevices            []k8sv1.VolumeDevice
+	volumeMounts             []k8sv1.VolumeMount
+	sharedFilesystems        []string
+	resources                k8sv1.ResourceRequirements
+	liveninessProbe          *k8sv1.Probe
+	readinessProbe           *k8sv1.Probe
+	ports                    []k8sv1.ContainerPort
+	capabilities             *k8sv1.Capabilities
+	allowPrivilegeEscalation *bool
+	args                     []string
+	extraEnvVars             []k8sv1.EnvVar
 }
 
 type Option func(*ContainerSpecRenderer)
@@ -57,7 +58,7 @@ func (csr *ContainerSpecRenderer) Render(cmd []string) k8sv1.Container {
 		Name:                     csr.name,
 		Image:                    csr.launcherImg,
 		ImagePullPolicy:          csr.imgPullPolicy,
-		SecurityContext:          securityContext(csr.userID, csr.capabilities),
+		SecurityContext:          securityContext(csr.userID, csr.capabilities, csr.allowPrivilegeEscalation),
 		Command:                  cmd,
 		VolumeDevices:            csr.volumeDevices,
 		VolumeMounts:             csr.volumeMounts,
@@ -105,6 +106,16 @@ func WithCapabilities(vmi *v1.VirtualMachineInstance) Option {
 		} else {
 			renderer.capabilities.Add = requiredCapabilities(vmi)
 		}
+	}
+}
+
+// WithAllowPrivilegeEscalation overrides the default allowPrivilegeEscalation
+// of the rendered container. For non-root containers the default is false,
+// which makes the container runtime enable no-new-privs and suppress the
+// file capabilities set on launcher image files (see rpm/BUILD.bazel).
+func WithAllowPrivilegeEscalation(allow bool) Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.allowPrivilegeEscalation = pointer.P(allow)
 	}
 }
 
@@ -204,7 +215,7 @@ func xdgEnvironmentVariables() []k8sv1.EnvVar {
 	}
 }
 
-func securityContext(userId int64, requiredCapabilities *k8sv1.Capabilities) *k8sv1.SecurityContext {
+func securityContext(userId int64, requiredCapabilities *k8sv1.Capabilities, allowPrivilegeEscalation *bool) *k8sv1.SecurityContext {
 	isNonRoot := userId != 0
 	context := &k8sv1.SecurityContext{
 		RunAsUser:    &userId,
@@ -215,6 +226,15 @@ func securityContext(userId int64, requiredCapabilities *k8sv1.Capabilities) *k8
 	if isNonRoot {
 		context.RunAsGroup = &userId
 		context.AllowPrivilegeEscalation = pointer.P(false)
+	}
+
+	// The kernel refuses to grant file capabilities (e.g. those on
+	// /usr/bin/passt, see rpm/BUILD.bazel) to processes running with
+	// no-new-privs, which the container runtime enables for containers
+	// with allowPrivilegeEscalation=false. An explicit override is
+	// required for the passt backend to reach its file capabilities.
+	if allowPrivilegeEscalation != nil {
+		context.AllowPrivilegeEscalation = allowPrivilegeEscalation
 	}
 
 	return context

@@ -4641,6 +4641,45 @@ var _ = Describe("Template", func() {
 			}, "hook-sidecar-0", nil, []k8sv1.Capability{"ALL"}),
 		)
 
+		DescribeTable("should set the correct allowPrivilegeEscalation on the compute container", func(
+			getVMI func() *v1.VirtualMachineInstance,
+			allowPrivilegeEscalation bool) {
+			vmi := getVMI()
+
+			pod, err := svc.RenderLaunchManifest(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			var compute *k8sv1.Container
+			for i := range pod.Spec.Containers {
+				if pod.Spec.Containers[i].Name == "compute" {
+					compute = &pod.Spec.Containers[i]
+					break
+				}
+			}
+			Expect(compute).ToNot(BeNil())
+			Expect(compute.SecurityContext.AllowPrivilegeEscalation).To(Equal(pointer.P(allowPrivilegeEscalation)))
+		},
+			Entry("on a non-root virt-launcher without passt binding", func() *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI("fake-vmi")
+				vmi.Status.RuntimeUser = uint64(nonRootUser)
+				return vmi
+			}, false),
+			// The passt backend sandboxes itself via the file capabilities on
+			// /usr/bin/passt, which the kernel only grants while no-new-privs
+			// (allowPrivilegeEscalation=false) is not active.
+			Entry("on a non-root virt-launcher with passt binding", func() *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI("fake-vmi")
+				vmi.Status.RuntimeUser = uint64(nonRootUser)
+				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
+					Name: "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						PasstBinding: &v1.InterfacePasstBinding{},
+					},
+				}}
+				return vmi
+			}, true),
+		)
+
 		DescribeTable("should compute the correct security context", func(
 			getVMI func() *v1.VirtualMachineInstance,
 			securityContext *k8sv1.PodSecurityContext) {
