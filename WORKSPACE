@@ -351,19 +351,19 @@ go_repository(
 # Pull go_image_base
 oci_pull(
     name = "go_image_base",
-    digest = "sha256:ca3f629c350fd1cb653caee7c5aed8967be4e43d9577fbb1cb4ed66c260e224e",
+    digest = "sha256:d2add786f2a5f43d1ab3ae54cd3193de929d0d12c378ff60891921f56f3e47ff",
     image = "gcr.io/distroless/base-debian12",
 )
 
 oci_pull(
     name = "go_image_base_aarch64",
-    digest = "sha256:8038930101c61ebca513d46d5ccb85c29b4c792026bed0c1c221196d98838ea5",
+    digest = "sha256:94d5278016c07e4e328da0a983823b92a2341df326d59de3408b8c6fd50bb4b3",
     image = "gcr.io/distroless/base-debian12",
 )
 
 oci_pull(
     name = "go_image_base_s390x",
-    digest = "sha256:c8e7bb821eda31ae00e99c74b0a2be5f96e95d6f78ab055f28ad8796e3e4c084",
+    digest = "sha256:19daaf0b09ea006981869d1b02664f455627868252d4547724d126de2a765e08",
     image = "gcr.io/distroless/base-debian12",
 )
 
