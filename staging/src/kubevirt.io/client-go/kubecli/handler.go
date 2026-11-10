@@ -259,6 +259,13 @@ func (v *virtHandlerConn) Pod() (pod *v1.Pod, err error) {
 }
 
 func (v *virtHandlerConn) doRequest(req *http.Request) (response string, err error) {
+	// The handler URL is user-influenced; reject non-HTTP(S) schemes so the
+	// client cannot be pointed at local or alternate-protocol targets.
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		err = fmt.Errorf("unsupported URL scheme %q", req.URL.Scheme)
+		return
+	}
+
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
 		return

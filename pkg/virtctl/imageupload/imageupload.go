@@ -396,11 +396,25 @@ func GetHTTPClient(insecure bool) *http.Client {
 	return client
 }
 
+// validateUploadProxyScheme rejects non-HTTP(S) schemes in user-supplied
+// upload proxy URLs so the request cannot be pointed at local or
+// alternate-protocol targets.
+func validateUploadProxyScheme(u *url.URL) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q in upload proxy URL", u.Scheme)
+	}
+	return nil
+}
+
 // ConstructUploadProxyPath - receives uploadproxy address and concatenates to it URI
 func ConstructUploadProxyPath(uploadProxyURL string) (string, error) {
 	u, err := url.Parse(uploadProxyURL)
 
 	if err != nil {
+		return "", err
+	}
+
+	if err := validateUploadProxyScheme(u); err != nil {
 		return "", err
 	}
 
@@ -415,6 +429,10 @@ func ConstructUploadProxyPathAsync(uploadProxyURL, token string, insecure bool) 
 	u, err := url.Parse(uploadProxyURL)
 
 	if err != nil {
+		return "", err
+	}
+
+	if err := validateUploadProxyScheme(u); err != nil {
 		return "", err
 	}
 
