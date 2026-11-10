@@ -177,6 +177,11 @@ func generateDeviceRulesForVMI(vmi *v1.VirtualMachineInstance, mountRoot *safepa
 		default:
 			continue
 		}
+		// volume.Name is user-supplied via the VMI spec and is used as a device
+		// file name under /dev, so it must be a plain file name.
+		if volume.Name == ".." || volume.Name != filepath.Base(volume.Name) {
+			return nil, fmt.Errorf("volume %q has an invalid device name", volume.Name)
+		}
 		rule, err := newAllowedDeviceRule(mountRoot, filepath.Join("/dev", volume.Name), getDeviceRwmPermissions())
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {

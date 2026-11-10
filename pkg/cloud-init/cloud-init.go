@@ -266,6 +266,12 @@ func resolveConfigDriveSecrets(vmi *v1.VirtualMachineInstance, secretSourceDir s
 		return keys, nil
 	}
 
+	// volume.Name is user-supplied via the VMI spec and is joined into the
+	// secret path, so it must be a plain file name.
+	if volume.Name == ".." || volume.Name != filepath.Base(volume.Name) {
+		return keys, fmt.Errorf("invalid config drive secret volume name %q", volume.Name)
+	}
+
 	baseDir := filepath.Join(secretSourceDir, volume.Name)
 	var userDataError, networkDataError error
 	var userData, networkData string
