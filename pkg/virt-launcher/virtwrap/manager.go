@@ -1594,6 +1594,11 @@ func (l *LibvirtDomainManager) startDomain(
 	return nil
 }
 
+// MemoryRestoreAnnotation names a checkpoint state file inside the launcher
+// pod. When it is set on a VMI and the file exists at start, the launcher
+// restores the domain from that memory state instead of cold-booting it.
+const MemoryRestoreAnnotation = "hive.io/memory-restore-state"
+
 func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
 	domain *api.Domain,
 	vmi *v1.VirtualMachineInstance,
@@ -1617,6 +1622,19 @@ func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
 		return nil, err
 	}
 
+	// Restore from a memory checkpoint instead of cold-booting when the VMI
+	// carries a restore annotation and the state file is reachable. The domain
+	// is restored with the freshly rendered XML — this pod's device paths and
+	// fds — so the guest resumes against the live device set, exactly as the
+	// live-migration target prepares its domain.
+	if stateFile := vmi.Annotations[MemoryRestoreAnnotation]; stateFile != "" {
+		_, statErr := os.Stat(stateFile)
+		if statErr == nil {
+			return l.restoreFromMemoryState(vmi, domain, stateFile)
+		}
+		logger.Reason(statErr).Warningf("memory restore state %q is gone; cold-booting instead", stateFile)
+	}
+
 	if dom, err = l.allocateHotplugPorts(vmi, &domain.Spec); err != nil {
 		logger.Reason(err).Error("failed to allocate hotplug ports")
 		return nil, err
@@ -1628,6 +1646,42 @@ func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
 	)
 	logger.Info("Domain defined.")
 	return dom, err
+}
+
+// restoreFromMemoryState restores the domain from the checkpointed memory state
+// at stateFile, using the current pod's rendered domain XML, and returns the
+// restored domain. The guest resumes with its in-memory state against this
+// pod's devices — no cold boot, no cloud-init re-run — and the caller adopts the
+// domain on the next reconcile.
+func (l *LibvirtDomainManager) restoreFromMemoryState(vmi *v1.VirtualMachineInstance, domain *api.Domain, stateFile string) (cli.VirDomain, error) {
+	logger := log.Log.Object(vmi)
+
+	// The cloud-init ISO is an ephemeral disk recreated per pod; a restore still
+	// needs the file present even though the guest consumed it before.
+	if err := l.generateCloudInitEmptyISO(vmi, nil); err != nil {
+		return nil, fmt.Errorf("creating the empty cloud-init ISO for the memory restore: %w", err)
+	}
+
+	xmlStr, err := util.BuildDomainSpecXML(vmi, &domain.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("rendering the domain XML for the memory restore: %w", err)
+	}
+
+	if err := l.virConn.DomainRestoreFlags(stateFile, xmlStr, 0); err != nil {
+		return nil, fmt.Errorf("restoring the domain memory state from %q: %w", stateFile, err)
+	}
+
+	dom, err := l.virConn.LookupDomainByName(domain.Spec.Name)
+	if err != nil {
+		return nil, fmt.Errorf("looking up the restored domain %q: %w", domain.Spec.Name, err)
+	}
+
+	l.metadataCache.UID.Set(vmi.UID)
+	l.metadataCache.GracePeriod.Set(
+		api.GracePeriodMetadata{DeletionGracePeriodSeconds: converter.GracePeriodSeconds(vmi)},
+	)
+	logger.Info("Restored the domain from the checkpointed memory state.")
+	return dom, nil
 }
 
 func (l *LibvirtDomainManager) allocateHotplugPorts(

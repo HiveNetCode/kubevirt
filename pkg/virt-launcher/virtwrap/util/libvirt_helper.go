@@ -163,20 +163,33 @@ func ApplySidecarHooks(vmi *v1.VirtualMachineInstance, wantedSpec *api.DomainSpe
 	return domainSpec, nil
 }
 
-func SetDomainSpecStrWithHooks(virConn cli.Connection, vmi *v1.VirtualMachineInstance, wantedSpec *api.DomainSpec) (cli.VirDomain, error) {
+// BuildDomainSpecXML runs the sidecar and plugin domain hooks and returns the
+// final domain XML for wantedSpec, without defining the domain. A memory
+// restore needs the same XML a cold boot would define — the current pod's
+// device paths and fds — so both paths share this.
+func BuildDomainSpecXML(vmi *v1.VirtualMachineInstance, wantedSpec *api.DomainSpec) (string, error) {
 	domainSpec, err := ApplySidecarHooks(vmi, wantedSpec)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	if pluginList := plugins.GetPlugins(); len(pluginList) > 0 {
 		updatedSpec, xmlStr, err := plugins.ApplyDomainHooks(pluginList, vmi, wantedSpec,
 			pluginv1alpha1.InvocationContextBoot)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		updatedSpec.DeepCopyInto(wantedSpec)
 		domainSpec = xmlStr
+	}
+
+	return domainSpec, nil
+}
+
+func SetDomainSpecStrWithHooks(virConn cli.Connection, vmi *v1.VirtualMachineInstance, wantedSpec *api.DomainSpec) (cli.VirDomain, error) {
+	domainSpec, err := BuildDomainSpecXML(vmi, wantedSpec)
+	if err != nil {
+		return nil, err
 	}
 
 	return SetDomainSpecStr(virConn, vmi, domainSpec)
