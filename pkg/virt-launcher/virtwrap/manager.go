@@ -1628,11 +1628,25 @@ func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
 	// fds — so the guest resumes against the live device set, exactly as the
 	// live-migration target prepares its domain.
 	if stateFile := vmi.Annotations[MemoryRestoreAnnotation]; stateFile != "" {
-		_, statErr := os.Stat(stateFile)
-		if statErr == nil {
-			return l.restoreFromMemoryState(vmi, domain, stateFile)
+		if _, statErr := os.Stat(stateFile); statErr == nil {
+			dom, restoreErr := l.restoreFromMemoryState(vmi, domain, stateFile)
+			if restoreErr == nil {
+				return dom, nil
+			}
+			// A failed restore must degrade to a cold boot, never strand the
+			// instance in Error: a stale or torn state file is the expected end
+			// of a checkpoint's life, and the platform never knows which start
+			// will find one. A restore that half-landed (the domain was
+			// restored but the lookup failed) left a domain under the expected
+			// name — adopt it instead of defining a fresh one over it.
+			if existing, lookupErr := l.virConn.LookupDomainByName(domain.Spec.Name); lookupErr == nil {
+				logger.Reason(restoreErr).Warningf("memory restore failed for %q; adopting the restored domain", stateFile)
+				return existing, nil
+			}
+			logger.Reason(restoreErr).Warningf("memory restore failed for %q; cold-booting instead", stateFile)
+		} else {
+			logger.Reason(statErr).Warningf("memory restore state %q is gone; cold-booting instead", stateFile)
 		}
-		logger.Reason(statErr).Warningf("memory restore state %q is gone; cold-booting instead", stateFile)
 	}
 
 	if dom, err = l.allocateHotplugPorts(vmi, &domain.Spec); err != nil {
@@ -1651,8 +1665,11 @@ func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
 // restoreFromMemoryState restores the domain from the checkpointed memory state
 // at stateFile, using the current pod's rendered domain XML, and returns the
 // restored domain. The guest resumes with its in-memory state against this
-// pod's devices — no cold boot, no cloud-init re-run — and the caller adopts the
-// domain on the next reconcile.
+// pod's devices — no cold boot, no cloud-init re-run.
+//
+// A failure here is not fatal: the caller degrades to a cold boot (or adopts a
+// half-restored domain), because a stale or torn state file is the expected end
+// of a checkpoint's life and must never strand the instance in Error.
 func (l *LibvirtDomainManager) restoreFromMemoryState(vmi *v1.VirtualMachineInstance, domain *api.Domain, stateFile string) (cli.VirDomain, error) {
 	logger := log.Log.Object(vmi)
 
@@ -1671,15 +1688,19 @@ func (l *LibvirtDomainManager) restoreFromMemoryState(vmi *v1.VirtualMachineInst
 		return nil, fmt.Errorf("restoring the domain memory state from %q: %w", stateFile, err)
 	}
 
+	// The restore landed: adopt the domain's identity before the lookup, so a
+	// lookup that still fails leaves the manager consistent with the live
+	// domain the caller will adopt.
+	l.metadataCache.UID.Set(vmi.UID)
+	l.metadataCache.GracePeriod.Set(
+		api.GracePeriodMetadata{DeletionGracePeriodSeconds: converter.GracePeriodSeconds(vmi)},
+	)
+
 	dom, err := l.virConn.LookupDomainByName(domain.Spec.Name)
 	if err != nil {
 		return nil, fmt.Errorf("looking up the restored domain %q: %w", domain.Spec.Name, err)
 	}
 
-	l.metadataCache.UID.Set(vmi.UID)
-	l.metadataCache.GracePeriod.Set(
-		api.GracePeriodMetadata{DeletionGracePeriodSeconds: converter.GracePeriodSeconds(vmi)},
-	)
 	logger.Info("Restored the domain from the checkpointed memory state.")
 	return dom, nil
 }
