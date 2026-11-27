@@ -51,14 +51,32 @@ jobs:
           REGISTRY_USERNAME: ${{ vars.DOCKER_USERNAME }}
 
       - name: Mirror images
+        # Inputs reach the script only through env and are format-checked, so
+        # a crafted value can become neither shell code nor a docker option.
+        env:
+          SRC_PREFIX: ${{ inputs.source_prefix }}
+          DST_PREFIX: ${{ inputs.dest_prefix }}
+          REGISTRY_URL: ${{ vars.DOCKER_REGISTRY }}
+          TAG: ${{ inputs.tag }}
+          IMAGES: ${{ inputs.images }}
         run: |
           set -euo pipefail
-          src_prefix="${{ github.event.inputs.source_prefix }}"
-          dst_prefix="${{ vars.DOCKER_REGISTRY }}/${{ github.event.inputs.dest_prefix }}"
-          tag="${{ github.event.inputs.tag }}"
-          for img in ${{ github.event.inputs.images }}; do
-            src="${src_prefix}/${img}:${tag}"
-            dst="${dst_prefix}/${img}:${tag}"
+          export LC_ALL=C
+          prefix_re='^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+          name_re='^[a-z0-9]+([._/-][a-z0-9]+)*$'
+          tag_re='^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'
+          [[ "$SRC_PREFIX" =~ $prefix_re ]] || { echo "::error::invalid source_prefix"; exit 1; }
+          [[ "$DST_PREFIX" =~ $prefix_re ]] || { echo "::error::invalid dest_prefix"; exit 1; }
+          [[ "$TAG" =~ $tag_re ]] || { echo "::error::invalid tag"; exit 1; }
+          [[ "$IMAGES" != *$'\n'* ]] || { echo "::error::images must be one space-separated line"; exit 1; }
+          read -r -a imgs <<< "$IMAGES"
+          [ "${#imgs[@]}" -gt 0 ] || { echo "::error::no images given"; exit 1; }
+          for img in "${imgs[@]}"; do
+            [[ "$img" =~ $name_re ]] || { echo "::error::invalid image name: $img"; exit 1; }
+          done
+          for img in "${imgs[@]}"; do
+            src="${SRC_PREFIX}/${img}:${TAG}"
+            dst="${REGISTRY_URL}/${DST_PREFIX}/${img}:${TAG}"
             echo "::group::mirror ${src} -> ${dst}"
             docker pull "$src"
             docker tag "$src" "$dst"
