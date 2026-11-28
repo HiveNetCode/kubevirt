@@ -20,7 +20,10 @@ on:
       push_targets:
         description: "Space-separated image targets to build and push"
         required: false
-        default: "virt-operator virt-api virt-controller virt-handler virt-launcher conformance pr-helper libguestfs-tools network-passt-binding"
+        # sidecar-shim belongs to every fleet line: with the Sidecar feature
+        # gate (COMP-3860) a missing shim tag leaves hook-annotated VMIs in
+        # ImagePullBackOff (staging-uae, 2026-11-27).
+        default: "virt-operator virt-api virt-controller virt-handler virt-launcher sidecar-shim conformance pr-helper libguestfs-tools network-passt-binding"
 
 # The repo default grants GITHUB_TOKEN write access. This job only reads the
 # repo and pushes with the OVH credentials, so the token needs nothing more.
