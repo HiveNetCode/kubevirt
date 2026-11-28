@@ -89,6 +89,20 @@ func (mr *MockConnectionMockRecorder) DomainDefineXML(xml any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DomainDefineXML", reflect.TypeOf((*MockConnection)(nil).DomainDefineXML), xml)
 }
 
+// DomainRestoreFlags mocks base method.
+func (m *MockConnection) DomainRestoreFlags(srcFile, xmlConf string, flags libvirt.DomainSaveRestoreFlags) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DomainRestoreFlags", srcFile, xmlConf, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DomainRestoreFlags indicates an expected call of DomainRestoreFlags.
+func (mr *MockConnectionMockRecorder) DomainRestoreFlags(srcFile, xmlConf, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DomainRestoreFlags", reflect.TypeOf((*MockConnection)(nil).DomainRestoreFlags), srcFile, xmlConf, flags)
+}
+
 // DomainEventDeregister mocks base method.
 func (m *MockConnection) DomainEventDeregister(registrationID int) error {
 	m.ctrl.T.Helper()
